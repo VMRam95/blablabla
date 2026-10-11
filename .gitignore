@@ -35,3 +35,11 @@ AGENTS.md
 
 # Logs
 *.log
+
+# Windows client: local environment and generated artifacts
+Windows/.venv/
+Windows/build/
+Windows/dist/
+Windows/*.spec
+__pycache__/
+artifacts/

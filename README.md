@@ -148,6 +148,16 @@ Unzip, drag to Applications, and you're good to go.
 
 ## Build from source
 
+### Windows 11 (local preview)
+
+A separate native Windows client is available in [`Windows/`](Windows/README.md).
+Run `Windows/run.cmd` with Python 3.11+, or open `Windows/dist/Blablabla.exe` after
+building it with `Windows/build.ps1`. It supports microphone dictation, a global
+**Ctrl + Alt + Space** toggle, text insertion and local history. Bring your own
+AssemblyAI API key. See the Windows guide for setup and current limitations.
+
+### macOS
+
 ```bash
 # 1. Install XcodeGen if you don't have it
 brew install xcodegen
