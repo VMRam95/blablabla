@@ -13,7 +13,8 @@ import winsound
 
 from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve, QEvent, QMimeData, QPoint,
     QSignalBlocker, Qt, QTimer, QUrl, QVariantAnimation)
-from PySide6.QtGui import QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence,
+    QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
     QKeySequenceEdit, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFrame, 
 import sounddevice as sd
 import native
 from speech import Session
-from ui import BRAND, GREEN, PINK, YELLOW, STYLE, ComboBox, RecordingIndicator, Switch, divider, gradient_line, icon, label
+from ui import BRAND, CYAN, GREEN, MICA_STYLE, PINK, YELLOW, STYLE, ComboBox, RecordingIndicator, Switch, divider, gradient_line, icon, label
 
 DATA_FILE = Path(os.environ["LOCALAPPDATA"]) / "Blablabla" / "windows.json"
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "Resources"
@@ -32,7 +33,7 @@ def load_data(path=DATA_FILE):
         return {"api_key": "", "copy_only": False, "device": "", "history": []}
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("history", []), list):
-        raise ValueError("Formato de datos local inválido")
+        raise ValueError("Invalid local data format")
     return data
 
 
@@ -91,6 +92,9 @@ class App(QMainWindow):
         self.resize(720, 760)
         self.setMinimumSize(700, 600)
         self.setStyleSheet(STYLE)
+        # Mica needs Windows 11 22H2+; must be set before the native window exists.
+        self.mica = sys.getwindowsversion().build >= 22621
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, self.mica)
         self.app_icon = QIcon(str(RESOURCES / "icon_squircle.png"))
         self.setWindowIcon(self.app_icon)
         self.hotkey = native.Hotkey(self.data.get("shortcut_modifiers", 3), self.data.get("shortcut_key", 0x20))
@@ -100,7 +104,7 @@ class App(QMainWindow):
             key = native.unprotect_key(self.data.get("api_key", ""))
         except Exception:
             key = ""
-            self.status_message = "Vuelve a introducir la clave API: no se pudo descifrar para este usuario."
+            self.status_message = "Re-enter your API key: it could not be decrypted for this user."
         self.key = QLineEdit(key)
         self.key.setPlaceholderText("Paste your AssemblyAI key")
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -149,6 +153,9 @@ class App(QMainWindow):
         self.position_indicator()
         self.tray = QSystemTrayIcon(self.app_icon, self)
         self.tray.setToolTip("Blablabla")
+        recording, busy = self.badged_icon(PINK), self.badged_icon(CYAN)
+        self.tray_icons = {"idle": self.app_icon, "listening": recording, "connecting": busy, "stopping": busy}
+        self.tray.messageClicked.connect(lambda: (self.select_page(1), self.show_window()))
         menu = QMenu(self)
         menu.addAction("Show Blablabla", self.show_window)
         self.tray_record_action = menu.addAction("Start dictation", self.toggle)
@@ -166,10 +173,21 @@ class App(QMainWindow):
         self.update_usage()
         self.update_key_display()
         if not self.hotkey.registered:
-            self.status_message = "El atajo está ocupado. Usa el indicador o configura otro atajo."
+            self.status_message = "Shortcut is in use. Use the indicator or set another shortcut."
         self.set_status(self.status_message)
         self.update_indicator()
         self.dark_titlebar()
+
+    def badged_icon(self, color):
+        """App icon with a status dot, so the tray shows when it is recording."""
+        pixmap = self.app_icon.pixmap(64, 64)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#101014"), 5))
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(34, 34, 27, 27)
+        painter.end()
+        return QIcon(pixmap)
 
     def build_sidebar(self):
         column = QVBoxLayout(self.sidebar)
@@ -565,6 +583,8 @@ class App(QMainWindow):
         self.status_dot.setStyleSheet(f"color:{color};font-size:10px;")
         if hasattr(self, "indicator"):
             self.indicator.setToolTip(message + ("\n" + self.current_text if self.current_text else ""))
+        if hasattr(self, "tray"):
+            self.tray.setToolTip(f"Blablabla · {message}"[:127])  # Windows tooltip limit
 
     def refresh_devices(self):
         if self.state != "idle":
@@ -581,9 +601,9 @@ class App(QMainWindow):
                 selected = self.device_combo.findText(saved)
                 self.device_combo.setCurrentIndex(max(0, selected))
                 if self.device_combo.count() == 1 or (selected <= 0 and sd.default.device[0] < 0):
-                    self.set_status("No hay micrófono predeterminado. Selecciona uno en Settings → Microphone.")
+                    self.set_status("No default microphone. Choose one in Settings → Microphone.")
             except Exception as error:
-                self.set_status(f"No se pueden consultar los micrófonos: {error}")
+                self.set_status(f"Cannot list microphones: {error}")
 
     def persist_settings(self):
         if self.state != "idle" or not hasattr(self, "copy_only"):
@@ -600,7 +620,7 @@ class App(QMainWindow):
             self.key.setModified(False)
             return True
         except Exception as error:
-            QMessageBox.critical(self, "No se pudieron guardar los ajustes", str(error))
+            QMessageBox.critical(self, "Could not save settings", str(error))
             return False
 
     def commit_key(self, force=False):
@@ -647,7 +667,7 @@ class App(QMainWindow):
         except OSError as error:
             with QSignalBlocker(self.launch_login):
                 self.launch_login.setChecked(previous)
-            QMessageBox.critical(self, "No se pudo cambiar el inicio automático", str(error))
+            QMessageBox.critical(self, "Could not change launch at login", str(error))
 
     def refresh_keycaps(self):
         clear_layout(self.keycaps)
@@ -661,7 +681,7 @@ class App(QMainWindow):
         self.hotkey = native.Hotkey(modifiers, key)
         if not self.hotkey.registered:
             self.hotkey = native.Hotkey(old_modifiers, old_key)
-            self.set_status("Ese atajo está ocupado por otra aplicación. Elige otra combinación.")
+            self.set_status("That shortcut is used by another app. Choose another one.")
             self.refresh_permissions()
             return False
         self.data.update(shortcut_modifiers=modifiers, shortcut_key=key, shortcut_label=description)
@@ -710,7 +730,7 @@ class App(QMainWindow):
         if int(Qt.Key.Key_F1) <= qt_key <= int(Qt.Key.Key_F12):
             key = 0x70 + qt_key - int(Qt.Key.Key_F1)
         if not modifiers or key is None:
-            self.set_status("Usa Ctrl/Alt/Shift/Win junto con una letra, número, F1–F12 o Espacio.")
+            self.set_status("Use Ctrl/Alt/Shift/Win with a letter, number, F1–F12 or Space.")
             return
         description = recorder.keySequence().toString(QKeySequence.SequenceFormat.NativeText).replace("+", " + ")
         self.change_shortcut(modifiers, key, description)
@@ -794,14 +814,14 @@ class App(QMainWindow):
             return
         if self.state in ("connecting", "listening"):
             self.state = "stopping"
-            self.set_status("Finalizando transcripción…")
+            self.set_status("Finalizing transcript…")
             self.session.stop()
             self.update_recording_controls()
             return
         if self.state != "idle":
             return
         if not self.key.text().strip():
-            self.set_status("Añade tu clave API en Settings antes de dictar.")
+            self.set_status("Add your API key in Settings before dictating.")
             self.select_page(0)
             self.show_window()
             self.key.setFocus()
@@ -814,9 +834,9 @@ class App(QMainWindow):
         self.session_copy_after = self.copy_after.isChecked()
         self.state = "connecting"
         self.current_text = ""
-        self.preview.setText("Start speaking when the indicator is ready…")
+        self.preview.setText("Start speaking…")
         self.live_card.show()
-        self.set_status("Conectando… espera a «Escuchando» para hablar.")
+        self.set_status("Starting…")
         self.position_indicator()
         self.update_recording_controls()
         self.session = Session(self.key.text().strip(), self.device_combo.currentData(), self.events)
@@ -839,7 +859,7 @@ class App(QMainWindow):
                 dot, description = self.microphone_permission
                 dot.setStyleSheet(f"color:{GREEN};font-size:12px;")
                 description.setText("Granted · microphone is recording")
-                self.set_status("Escuchando… pulsa el atajo para terminar.")
+                self.set_status("Listening… press the shortcut to finish.")
                 self.feedback("start_sound")
                 self.update_recording_controls()
             elif kind == "level":
@@ -876,28 +896,29 @@ class App(QMainWindow):
         try:
             save_data(self.data)
         except Exception as save_error:
-            error = f"No se pudo guardar el historial: {save_error}. Copia el texto de la ventana."
+            error = f"Could not save history: {save_error}. Copy the text from the window."
             self.live_card.setVisible(bool(text))
         if text and not error and not self.closing:
             if self.session_copy_only:
                 self.copy(text)
             else:
                 record["inserted"] = self.paste(text)
-                self.set_status("Texto escrito en la aplicación." if record["inserted"] else
-                    "Texto guardado. Puedes copiarlo de Transcripts.")
+                self.set_status("Text inserted." if record["inserted"] else
+                    "Text saved. Copy it from Transcripts.")
                 if self.session_copy_after:
                     self.copy(text)
                 try:
                     save_data(self.data)
                 except OSError:
-                    self.set_status("Texto guardado; no se pudo actualizar el estado de inserción.")
+                    self.set_status("Text saved; could not update its insertion state.")
         elif not text:
-            self.set_status("No se detectó voz. Listo para dictar.")
+            self.set_status("No speech detected. Ready to dictate.")
         if error:
             self.set_status(error)
             self.status_dot.setStyleSheet(f"color:{PINK};font-size:10px;")
-            if not self.closing:
-                self.show_window()
+            if not self.closing and not self.isVisible():
+                # A notification instead of popping the whole window up.
+                self.tray.showMessage("Blablabla", error, QSystemTrayIcon.MessageIcon.Warning, 8000)
         self.refresh_history()
         self.update_usage()
         self.update_recording_controls()
@@ -915,6 +936,7 @@ class App(QMainWindow):
         self.update_indicator()
 
     def update_indicator(self):
+        self.tray.setIcon(self.tray_icons[self.state])
         self.indicator.state = self.state
         self.indicator.update()
         visible = not self.closing and (self.state != "idle" or not self.indicator_only_recording.isChecked())
@@ -961,7 +983,7 @@ class App(QMainWindow):
     def copy(self, text):
         if text:
             QApplication.clipboard().setText(text)
-            self.set_status("Texto copiado al portapapeles.")
+            self.set_status("Copied to clipboard.")
 
     def feedback(self, key):
         if self.sounds_enabled.isChecked():
@@ -988,9 +1010,17 @@ class App(QMainWindow):
         try:
             dwm = ctypes.WinDLL("dwmapi")
             dwm.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
-            for attribute, value in ((20, 1), (33, 2), (35, 0x00141212)):
+            # Caption colour (BGR) matches the dark Mica tint, overriding the accent colour.
+            for attribute, value in ((20, 1), (33, 2), (35, 0x0023201F if self.mica else 0x00141212)):
                 setting = ctypes.c_int(value)
                 dwm.DwmSetWindowAttribute(int(self.winId()), attribute, ctypes.byref(setting), 4)
+            if self.mica:
+                margins = (ctypes.c_int * 4)(-1, -1, -1, -1)
+                dwm.DwmExtendFrameIntoClientArea(ctypes.c_void_p(int(self.winId())), margins)
+                backdrop = ctypes.c_int(2)  # DWMWA_SYSTEMBACKDROP_TYPE = Mica
+                self.mica = dwm.DwmSetWindowAttribute(int(self.winId()), 38, ctypes.byref(backdrop), 4) == 0
+            if self.mica:
+                self.setStyleSheet(STYLE + MICA_STYLE)
         except OSError:
             pass
 
@@ -1014,7 +1044,7 @@ class App(QMainWindow):
         self.closing = True
         if self.session:
             self.session.stop()
-            self.set_status("Cerrando la sesión de dictado…")
+            self.set_status("Closing the dictation session…")
             self.update_recording_controls()
         else:
             self.dispose()
@@ -1043,8 +1073,8 @@ def main():
     try:
         window = App()
     except Exception as error:
-        QMessageBox.critical(None, "Blablabla no pudo arrancar",
-            f"{error}\n\nDatos locales: {DATA_FILE}\nSi el archivo está dañado, conserva una copia antes de moverlo.")
+        QMessageBox.critical(None, "Blablabla could not start",
+            f"{error}\n\nLocal data: {DATA_FILE}\nIf the file is damaged, keep a copy before moving it.")
         return 1
     window.show()
     return qt_app.exec()

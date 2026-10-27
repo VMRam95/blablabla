@@ -61,6 +61,14 @@ QToolTip { background: #242429; color: #dedee2; border: 1px solid #414148; paddi
 """
 
 
+# Windows 11 Mica: let the backdrop show through; cards become subtle layers.
+MICA_STYLE = """
+QMainWindow, QWidget#page, QScrollArea, QScrollArea > QWidget, QStackedWidget { background: transparent; }
+QFrame#sidebar { background: rgba(0, 0, 0, 0.18); }
+QFrame#card { background: rgba(255, 255, 255, 0.055); }
+"""
+
+
 def label(text, role=None, parent=None):
     widget = QLabel(text, parent)
     widget.setTextFormat(Qt.TextFormat.PlainText)

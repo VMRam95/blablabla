@@ -148,7 +148,7 @@ class ProtocolTests(unittest.TestCase):
         session = speech.Session("secret-never-print", None, queue.Queue())
         with patch.object(speech.urllib.request, "urlopen", side_effect=
                 urllib.error.HTTPError("url", 401, "Unauthorized", None, None)):
-            with self.assertRaisesRegex(RuntimeError, "clave API") as error:
+            with self.assertRaisesRegex(RuntimeError, "API key") as error:
                 session.token()
         self.assertNotIn("secret-never-print", str(error.exception))
 
@@ -162,7 +162,7 @@ class ProtocolTests(unittest.TestCase):
         kind, (text, error) = events.get_nowait()
         self.assertEqual(kind, "finished")
         self.assertEqual(text, "")
-        self.assertIn("Conecta uno", error)
+        self.assertIn("Connect one", error)
 
     def test_disconnected_endpoint_does_not_open_billable_session(self):
         events = queue.Queue()
@@ -176,7 +176,7 @@ class ProtocolTests(unittest.TestCase):
             token.assert_not_called()
         kind, (text, error) = events.get_nowait()
         self.assertEqual(kind, "finished")
-        self.assertIn("no entrega audio", error)
+        self.assertIn("delivers no audio", error)
         self.assertTrue(stream.closed)
 
 
@@ -236,7 +236,7 @@ class WindowsTests(unittest.TestCase):
             qt_app.processEvents()
             client.toggle()
             self.assertEqual(client.state, "idle")
-            self.assertIn("clave API", client.status_message)
+            self.assertIn("API key", client.status_message)
         finally:
             if client:
                 client.dispose()
@@ -247,13 +247,21 @@ class WindowsTests(unittest.TestCase):
         try:
             with patch.object(app, "load_data", return_value={"history": []}):
                 client = app.App()
+            client.state = "listening"
+            client.update_indicator()
+            self.assertEqual(client.tray.icon().cacheKey(), client.tray_icons["listening"].cacheKey())
             with patch.object(app, "save_data") as save, \
-                 patch.object(native, "paste") as insert:
+                 patch.object(native, "paste") as insert, \
+                 patch.object(client.tray, "showMessage") as notify:
                 client.finish("Texto parcial", "Se perdió la conexión")
                 self.assertTrue(client.data["history"][0]["partial"])
                 self.assertEqual(client.data["history"][0]["text"], "Texto parcial")
                 save.assert_called_once()
                 insert.assert_not_called()
+                # Hidden window: notify instead of popping it up.
+                notify.assert_called_once()
+                self.assertFalse(client.isVisible())
+                self.assertEqual(client.tray.icon().cacheKey(), client.tray_icons["idle"].cacheKey())
         finally:
             if client:
                 client.dispose()

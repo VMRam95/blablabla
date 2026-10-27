@@ -52,8 +52,8 @@ class Session:
         except urllib.error.HTTPError as error:
             # Don't expose the API key, token or request URL in UI/logs.
             if error.code in (401, 403):
-                raise RuntimeError("AssemblyAI rechazó la clave API. Revísala en Ajustes.") from None
-            raise RuntimeError(f"AssemblyAI no está disponible (HTTP {error.code}).") from None
+                raise RuntimeError("AssemblyAI rejected the API key. Check it in Settings.") from None
+            raise RuntimeError(f"AssemblyAI is unavailable (HTTP {error.code}).") from None
 
     def run(self):
         # Buffers speech while the cloud connection opens (50 ms blocks, ~20 s).
@@ -73,12 +73,12 @@ class Session:
             samples = memoryview(data).cast("h")
             self.events.put(("level", max((abs(value) for value in samples[::64]), default=0) / 32768))
             if status:
-                errors.put("El micrófono perdió audio. Prueba otro dispositivo.")
+                errors.put("The microphone dropped audio. Try another device.")
                 self.stop()
             try:
                 audio.put_nowait(bytes(data))
             except queue.Full:
-                errors.put("La conexión no puede enviar el audio a tiempo. Vuelve a intentarlo.")
+                errors.put("The connection cannot keep up with the audio. Try again.")
                 self.stop()
 
         def receive():
@@ -89,7 +89,7 @@ class Session:
                     except websocket.WebSocketTimeoutException:
                         continue
                     if not raw:
-                        raise RuntimeError("AssemblyAI cerró la conexión antes de finalizar.")
+                        raise RuntimeError("AssemblyAI closed the connection before finishing.")
                     event = json.loads(raw)
                     if event["type"] == "Turn":
                         self.events.put(("transcript", transcript.update(event)))
@@ -97,7 +97,7 @@ class Session:
                         terminated.set()
                         break
                     elif event["type"] == "Error":
-                        raise RuntimeError("AssemblyAI: " + str(event.get("error", "Error de transcripción")))
+                        raise RuntimeError("AssemblyAI: " + str(event.get("error", "Transcription error")))
             except Exception as error:
                 if not receiver_done.is_set():
                     errors.put(str(error))
@@ -112,11 +112,11 @@ class Session:
                 info = sd.query_devices(self.device, "input")
                 rate = int(info["default_samplerate"])
                 if not 8000 <= rate <= 96000:
-                    raise RuntimeError("Selecciona un micrófono con frecuencia entre 8 y 96 kHz.")
+                    raise RuntimeError("Choose a microphone with a sample rate between 8 and 96 kHz.")
                 stream = sd.RawInputStream(device=self.device, samplerate=rate,
                     channels=1, dtype="int16", blocksize=rate // 20, callback=capture)
             except sd.PortAudioError:
-                raise RuntimeError("No se puede abrir el micrófono. Conecta uno, revisa los permisos de Windows y selecciónalo en Ajustes.") from None
+                raise RuntimeError("Cannot open the microphone. Connect one, check Windows privacy settings and choose it in Settings.") from None
             if self.stop_requested.is_set():
                 return
             # Some Windows drivers advertise disconnected endpoints. Verify
@@ -127,7 +127,7 @@ class Session:
                 if self.stop_requested.is_set():
                     return
                 if not stream.active or time.monotonic() >= audio_deadline:
-                    raise RuntimeError("El micrófono no entrega audio. Revisa la conexión y los permisos, o selecciona otro en Ajustes.")
+                    raise RuntimeError("The microphone delivers no audio. Check it and its permissions, or choose another in Settings.")
             # Record right away; the buffered audio is sent once connected,
             # so a stop during the connection still transcribes it.
             self.events.put(("listening", None))
@@ -139,21 +139,21 @@ class Session:
                     "wss://streaming.assemblyai.com/v3/ws?" + query,
                     timeout=12, enable_multithread=True)
             except Exception:
-                raise RuntimeError("No se pudo conectar con AssemblyAI. Revisa la red y la clave.") from None
+                raise RuntimeError("Could not connect to AssemblyAI. Check your network and API key.") from None
             begin = json.loads(socket.recv())
             if begin.get("type") != "Begin":
-                raise RuntimeError("AssemblyAI no pudo iniciar la sesión: " + str(begin.get("error", "Respuesta inesperada")))
+                raise RuntimeError("AssemblyAI could not start the session: " + str(begin.get("error", "Unexpected response")))
             socket.settimeout(0.5)
             receiver = threading.Thread(target=receive, daemon=True)
             receiver.start()
             deadline = time.monotonic() + 540  # Below the temporary token lifetime.
             while not self.stop_requested.is_set():
                 if time.monotonic() >= deadline:
-                    self.events.put(("stopping", "Límite de 9 minutos. Finalizando…"))
+                    self.events.put(("stopping", "9-minute limit reached. Finalizing…"))
                     self.stop()
                     break
                 if not stream.active:
-                    raise RuntimeError("El micrófono se desconectó durante la grabación.")
+                    raise RuntimeError("The microphone disconnected while recording.")
                 try:
                     socket.send_binary(audio.get(timeout=0.02))  # notice a stop quickly
                 except queue.Empty:
@@ -167,7 +167,7 @@ class Session:
             while not terminated.is_set() and not receiver_done.is_set() and time.monotonic() < end:
                 terminated.wait(0.1)
             if not terminated.is_set() and errors.empty():
-                errors.put("La sesión no confirmó el final. El texto parcial queda en el historial; revísalo antes de copiar.")
+                errors.put("The session did not confirm the end. The partial text is in Transcripts; review it before copying.")
             clean_termination = terminated.is_set()
         except Exception as error:
             errors.put(str(error))
