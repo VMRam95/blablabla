@@ -115,6 +115,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(text, "hola")
         self.assertIn("Sin saldo", error)
 
+    def test_audio_recorded_while_connecting_is_sent(self):
+        events = queue.Queue()
+        session = speech.Session("dummy", None, events)
+        socket = FakeSocket()
+        def token():
+            self.assertEqual(events.get_nowait()[0], "level")
+            self.assertEqual(events.get_nowait(), ("listening", None))
+            session.stop()  # user stops before the connection is ready
+            return "token"
+        with patch.object(speech.sd, "query_devices", return_value={"default_samplerate": 48000}), \
+             patch.object(speech.sd, "RawInputStream", side_effect=FakeStream), \
+             patch.object(session, "token", side_effect=token), \
+             patch.object(speech.websocket, "create_connection", return_value=socket):
+            session.run()
+        self.assertEqual(socket.sent[0], bytes(4800))
+        self.assertEqual(events.queue[-1], ("finished", ("¡Hola, mundo!", None)))
+
     def test_stop_during_connect_does_not_start_capture(self):
         events = queue.Queue()
         session = speech.Session("dummy", None, events)

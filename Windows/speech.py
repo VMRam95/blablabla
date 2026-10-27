@@ -56,7 +56,8 @@ class Session:
             raise RuntimeError(f"AssemblyAI no está disponible (HTTP {error.code}).") from None
 
     def run(self):
-        audio = queue.Queue(maxsize=100)
+        # Buffers speech while the cloud connection opens (50 ms blocks, ~20 s).
+        audio = queue.Queue(maxsize=400)
         transcript = Transcript()
         terminated = threading.Event()
         receiver_done = threading.Event()
@@ -127,14 +128,10 @@ class Session:
                     return
                 if not stream.active or time.monotonic() >= audio_deadline:
                     raise RuntimeError("El micrófono no entrega audio. Revisa la conexión y los permisos, o selecciona otro en Ajustes.")
-            stream.stop()
-            while not audio.empty():
-                audio.get_nowait()
-            if self.stop_requested.is_set():
-                return
+            # Record right away; the buffered audio is sent once connected,
+            # so a stop during the connection still transcribes it.
+            self.events.put(("listening", None))
             token = self.token()
-            if self.stop_requested.is_set():
-                return
             query = urllib.parse.urlencode({"sample_rate": rate, "encoding": "pcm_s16le",
                 "speech_model": "universal-3-6-pro", "token": token})
             try:
@@ -149,9 +146,6 @@ class Session:
             socket.settimeout(0.5)
             receiver = threading.Thread(target=receive, daemon=True)
             receiver.start()
-            if not self.stop_requested.is_set():
-                stream.start()
-                self.events.put(("listening", None))
             deadline = time.monotonic() + 540  # Below the temporary token lifetime.
             while not self.stop_requested.is_set():
                 if time.monotonic() >= deadline:
