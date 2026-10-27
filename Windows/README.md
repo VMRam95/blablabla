@@ -102,8 +102,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Windows\build.ps1
 ```
 
 Genera `Windows/dist/Blablabla.exe` con PyInstaller. El entorno, los archivos de
-compilación y el ejecutable están excluidos de Git. Puedes copiar el EXE a otro
-Windows 11 de 64 bits sin instalar Python.
+compilación y el ejecutable están excluidos de Git. Se genera como carpeta (EXE +
+`_internal`) para que arranque al instante; para llevarlo a otro Windows 11 de 64
+bits copia la carpeta `dist` entera, sin necesidad de instalar Python.
 
 ## Verificación
 

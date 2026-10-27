@@ -155,7 +155,7 @@ class Session:
                 if not stream.active:
                     raise RuntimeError("El micrófono se desconectó durante la grabación.")
                 try:
-                    socket.send_binary(audio.get(timeout=0.1))
+                    socket.send_binary(audio.get(timeout=0.02))  # notice a stop quickly
                 except queue.Empty:
                     continue
             stream.stop()
@@ -177,6 +177,9 @@ class Session:
                     stream.close()
                 except Exception:
                     pass
+            if clean_termination:
+                # The transcript is final: paste now, close the socket afterwards.
+                self.report(transcript, errors)
             if socket is not None:
                 if not clean_termination:
                     try:
@@ -190,6 +193,10 @@ class Session:
                     pass
             if receiver is not None:
                 receiver.join(timeout=2)
-            error = errors.get() if not errors.empty() else None
-            self.events.put(("finished", (transcript.text, error)))
+            if not clean_termination:
+                self.report(transcript, errors)
             self.finished.set()
+
+    def report(self, transcript, errors):
+        error = errors.get() if not errors.empty() else None
+        self.events.put(("finished", (transcript.text, error)))

@@ -285,9 +285,12 @@ class QtInterfaceTests(unittest.TestCase):
         QTest.mouseClick(self.client.nav[1][0], Qt.MouseButton.LeftButton)
         self.assertEqual(self.client.pages.currentIndex(), 1)
         QTest.mouseClick(self.client.collapse_button, Qt.MouseButton.LeftButton)
+        QTest.qWait(300)  # animated
         self.assertEqual(self.client.sidebar.width(), 54)
         QTest.mouseClick(self.client.collapse_button, Qt.MouseButton.LeftButton)
+        QTest.qWait(300)
         self.assertEqual(self.client.sidebar.width(), 200)
+        self.assertIsNone(self.client.pages.currentWidget().graphicsEffect())  # fade cleaned up
         self.client.select_page(0)
         for width in (700, 720, 980):
             self.client.resize(width, 760)

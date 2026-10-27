@@ -11,9 +11,10 @@ import time
 import winreg
 import winsound
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QMimeData, QPoint, QSignalBlocker, Qt, QTimer, QUrl
+from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve, QEvent, QMimeData, QPoint,
+    QSignalBlocker, Qt, QTimer, QUrl, QVariantAnimation)
 from PySide6.QtGui import QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
     QKeySequenceEdit, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
@@ -117,8 +118,20 @@ class App(QMainWindow):
         self.sidebar = QFrame()
         self.sidebar.setObjectName("sidebar")
         self.sidebar.setFixedWidth(200)
+        self.sidebar_slide = QVariantAnimation(self)
+        self.sidebar_slide.setDuration(180)
+        self.sidebar_slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.sidebar_slide.valueChanged.connect(self.sidebar.setFixedWidth)
         shell.addWidget(self.sidebar)
         self.build_sidebar()
+        self.fading = None
+        self.page_fade = QVariantAnimation(self)
+        self.page_fade.setDuration(160)
+        self.page_fade.setStartValue(0.0)
+        self.page_fade.setEndValue(1.0)
+        self.page_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.page_fade.valueChanged.connect(self.fade_step)
+        self.page_fade.finished.connect(self.end_fade)
         self.pages = QStackedWidget()
         shell.addWidget(self.pages, 1)
         self.settings_page, self.settings_layout = self.page("Settings")
@@ -502,6 +515,8 @@ class App(QMainWindow):
         return dot, description
 
     def select_page(self, index):
+        if index != self.pages.currentIndex() and self.isVisible():
+            self.fade_in(self.pages.widget(index))
         self.pages.setCurrentIndex(index)
         for number, (item, image, caption, badge, symbol) in enumerate(self.nav):
             selected = number == index
@@ -509,9 +524,29 @@ class App(QMainWindow):
             caption.setStyleSheet(f"font-size:13px;font-weight:500;color:{'#ffffff' if selected else '#797980'};")
             image.setPixmap(icon(symbol, "#e5e5e9" if selected else "#797980", 14).pixmap(18, 18))
 
+    def fade_in(self, widget):
+        self.page_fade.stop()
+        self.end_fade()
+        self.fading = widget
+        widget.setGraphicsEffect(QGraphicsOpacityEffect(widget, opacity=0.0))
+        self.page_fade.start()
+
+    def fade_step(self, value):
+        if self.fading is not None:
+            self.fading.graphicsEffect().setOpacity(value)
+
+    def end_fade(self):
+        # Drop the effect afterwards: it would slow down scrolling.
+        if self.fading is not None:
+            self.fading.setGraphicsEffect(None)
+            self.fading = None
+
     def toggle_sidebar(self):
         self.collapsed = not self.collapsed
-        self.sidebar.setFixedWidth(54 if self.collapsed else 200)
+        self.sidebar_slide.stop()
+        self.sidebar_slide.setStartValue(self.sidebar.width())
+        self.sidebar_slide.setEndValue(54 if self.collapsed else 200)
+        self.sidebar_slide.start()
         self.brand.setVisible(not self.collapsed)
         self.status_label.setVisible(not self.collapsed)
         self.collapse_button.setToolTip("Expand sidebar" if self.collapsed else "Collapse sidebar")

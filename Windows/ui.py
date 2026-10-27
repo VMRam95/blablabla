@@ -1,7 +1,7 @@
 """The macOS visual language, drawn with Qt on Windows."""
 import math
 
-from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QAbstractButton, QComboBox, QFrame, QLabel, QWidget
@@ -114,16 +114,37 @@ class Switch(QAbstractButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAccessibleName(name)
         self.setToolTip(name)
-        self.toggled.connect(lambda: self.update())
+        self.position = float(checked)
+        self.slide = QVariantAnimation(self)
+        self.slide.setDuration(140)
+        self.slide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.slide.valueChanged.connect(self.set_position)
+        self.toggled.connect(self.animate)
+
+    def animate(self, checked):
+        self.slide.stop()
+        if not self.isVisible():
+            self.set_position(float(checked))
+            return
+        self.slide.setStartValue(self.position)
+        self.slide.setEndValue(float(checked))
+        self.slide.start()
+
+    def set_position(self, value):
+        self.position = value
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(GREEN if self.isChecked() else "#39393f"))
+        off, on = QColor("#39393f"), QColor(GREEN)
+        t = self.position
+        painter.setBrush(QColor.fromRgbF(off.redF() + (on.redF()-off.redF())*t,
+            off.greenF() + (on.greenF()-off.greenF())*t, off.blueF() + (on.blueF()-off.blueF())*t))
         painter.drawRoundedRect(QRectF(0, 0, 30, 18), 9, 9)
         painter.setBrush(QColor("#f4f4f6" if self.isEnabled() else "#66666c"))
-        painter.drawEllipse(QRectF(14 if self.isChecked() else 2, 2, 14, 14))
+        painter.drawEllipse(QRectF(2 + 12*t, 2, 14, 14))
 
 
 class ComboBox(QComboBox):
@@ -149,20 +170,34 @@ class RecordingIndicator(QWidget):
         self.setFixedSize(76, 38)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAccessibleName("Dictation indicator")
-        self.state = "idle"
+        self._state = "idle"
         self.level = 0
+        self.shown_level = 0
         self.frame = 0
         self.draggable = False
         self.drag_start = None
         self.moved = False
         self.animation = QTimer(self)
+        self.animation.setTimerType(Qt.TimerType.PreciseTimer)
         self.animation.timeout.connect(self.animate)
-        self.animation.start(40)
+
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, value):
+        self._state = value
+        # ~60 fps only while active; idle draws a static wave.
+        if value == "idle":
+            self.animation.stop()
+        elif not self.animation.isActive():
+            self.animation.start(16)
 
     def animate(self):
-        if self.state != "idle":
-            self.frame += 1
-            self.update()
+        self.frame += 1
+        self.shown_level += (self.level - self.shown_level) * 0.2
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -178,16 +213,24 @@ class RecordingIndicator(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             for index in range(3):
                 color = QColor(CYAN)
-                color.setAlphaF(0.3 + 0.7 * (0.5 + 0.5 * math.sin(self.frame / 5 - index)))
+                color.setAlphaF(0.3 + 0.7 * (0.5 + 0.5 * math.sin(self.frame / 12 - index)))
                 painter.setBrush(color)
                 painter.drawEllipse(QRectF(27 + index*9, 14, 4, 4))
             return
         path = QPainterPath()
-        points = [(0,.5),(.12,.5),(.20,.3),(.28,.65),(.36,.15),(.44,.8),
-                  (.52,.08),(.60,.88),(.68,.20),(.76,.62),(.84,.38),(.92,.5),(1,.5)]
-        amplitude = 1 if self.state == "idle" else max(0.15, min(1.2, self.level*4))
+        if self.state == "idle":
+            points = [(0,.5),(.12,.5),(.20,.3),(.28,.65),(.36,.15),(.44,.8),
+                      (.52,.08),(.60,.88),(.68,.20),(.76,.62),(.84,.38),(.92,.5),(1,.5)]
+            points = [(x, (y-.5)*16) for x, y in points]
+        else:
+            # A travelling wave, tapered at both ends, that follows the voice level.
+            amplitude = 8 * max(0.15, min(1.2, self.shown_level*4))
+            phase = self.frame * 0.18
+            points = [(x, amplitude * math.sin(math.pi*x)**1.5 *
+                       (0.6*math.sin(13.8*x - phase) + 0.4*math.sin(23.2*x + phase*1.3)))
+                      for x in (i/40 for i in range(41))]
         for index, (x, y) in enumerate(points):
-            point = QPointF(16 + x*44, 17 + (y-.5)*16*amplitude)
+            point = QPointF(16 + x*44, 17 + y)
             path.moveTo(point) if index == 0 else path.lineTo(point)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(gradient, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
