@@ -57,12 +57,18 @@ apunta el acceso; puedes copiarlo antes a una carpeta permanente de tu usuario.
 - Transcripción en directo mediante AssemblyAI Universal Streaming v3,
   modelo `universal-3-6-pro`, con idiomas detectados automáticamente.
 - Atajo global configurable en **Shortcut → Record**, incluso con la ventana minimizada.
-- Inserción Unicode mediante `SendInput`, sin modificar el portapapeles.
+  Toque corto: empieza y otro toque termina. Mantenerlo pulsado: graba mientras lo
+  mantienes y pega al soltarlo. La grabación empieza al instante mientras conecta.
+- Pegado instantáneo con un único Ctrl+V; el portapapeles anterior se restaura a los 1,5 s.
 - Modos **Clipboard only**, **Also copy to clipboard** y copia manual de transcripciones.
 - Historial local y clave cifrada con Windows DPAPI para el usuario actual.
 - Recuperación de texto parcial en el historial cuando falla la conexión.
-- Indicador flotante con la onda y el gradiente originales, animado con el nivel del micrófono.
-- Bandeja del sistema, inicio al iniciar sesión opcional, sonidos de Windows y uso local.
+- Indicador flotante con la onda y el gradiente originales, animado a 60 fps con el nivel
+  del micrófono, y texto en vivo junto al indicador (**Show live text**).
+- Fondo Mica de Windows 11 (tema opaco en versiones anteriores) y animaciones suaves.
+- Bandeja del sistema con punto de estado (rosa grabando, cian conectando o finalizando),
+  avisos de error como notificación de Windows, inicio al iniciar sesión opcional,
+  sonidos de Windows y uso local.
 - Historial por tarjetas, búsqueda y paginación como en macOS.
 
 El audio va directamente a AssemblyAI y requiere Internet y una cuenta con acceso
@@ -74,8 +80,7 @@ La clave está cifrada; los textos del historial no. No añadas este archivo al 
 
 ## Límites de esta primera versión
 
-- El atajo funciona como interruptor; todavía no incluye mantener pulsado,
-  doble toque ni tecla Fn.
+- El atajo no admite doble toque ni tecla Fn.
 - Cerrar la ventana termina la aplicación y cierra la sesión activa. Minimizarla
   mantiene disponible el atajo. Si activas **Minimize to tray**, cerrar o minimizar
   oculta la ventana y el dictado sigue disponible desde la bandeja; **Quit Blablabla**
@@ -84,14 +89,16 @@ La clave está cifrada; los textos del historial no. No añadas este archivo al 
   resultado en el historial. Si vuelves a la ventana de Blablabla, puede restaurar
   el foco del destino original.
 - Windows bloquea la inserción en apps ejecutadas con privilegios superiores.
-  Usa copia manual en esos casos. Algunos campos, juegos o terminales pueden
-  no aceptar eventos Unicode. El historial conserva el texto; si una inserción
-  fue parcial, revisa el destino antes de copiar el texto completo.
+  Usa copia manual en esos casos. Las apps que no acepten Ctrl+V para pegar no
+  recibirán el texto; el historial lo conserva para copiarlo a mano.
 - Si otra aplicación usa tu atajo, puedes usar el botón o grabar otra combinación.
 - La lista de micrófonos se actualiza con **Microphone → Refresh**. Si desenchufas
   el micrófono durante una sesión, revisa el texto parcial y vuelve a empezar.
 - Los permisos, sonidos y barra de título son los de Windows; no se imitan permisos
-  exclusivos de macOS. **Updates** enlaza al proyecto; aún no hay actualizador Windows.
+  exclusivos de macOS. **Updates** busca en GitHub Releases una versión más nueva con
+  un archivo `Blablabla-vX.Y.Z-Windows.zip` y ofrece descargarla; no se instala sola
+  porque el ejecutable no está firmado. `build.ps1` genera ese zip en `Windows/build/`
+  (sube `APP_VERSION` en `app.py` antes de publicar).
 - **Launch at login** modifica únicamente el valor `Blablabla` en la clave de inicio
   del usuario actual de Windows. Está desactivado por defecto y se elimina al desactivarlo.
 

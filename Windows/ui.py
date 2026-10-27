@@ -4,7 +4,7 @@ import math
 from PySide6.QtCore import QByteArray, QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QAbstractButton, QComboBox, QFrame, QLabel, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QFrame, QLabel, QWidget
 
 BASE, SIDEBAR, CARD, INPUT = "#121214", "#171719", "#1c1c21", "#242429"
 CYAN, GREEN, YELLOW, PINK = "#00d9f2", "#4df266", "#ffd91a", "#ff4d99"
@@ -164,6 +164,44 @@ class ComboBox(QComboBox):
         x, y = self.width() - 12, self.height() / 2
         painter.drawLine(QPointF(x-3, y-1), QPointF(x, y+2))
         painter.drawLine(QPointF(x, y+2), QPointF(x+3, y-1))
+
+
+class LiveCaption(QLabel):
+    """Floating pill next to the indicator with the latest dictated words."""
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setFixedWidth(440)
+        self.setContentsMargins(14, 9, 14, 9)
+        self.setStyleSheet("color: #e8e8e9; font-size: 13px;")
+
+    def paintEvent(self, event):
+        # Translucent top-level windows ignore stylesheet backgrounds: draw the pill.
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#32323b"), 1))
+        painter.setBrush(QColor(16, 16, 20, 235))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        painter.end()
+        super().paintEvent(event)
+
+    def show_text(self, text, anchor):
+        if len(text) > 110:  # keep the tail: two lines at most
+            text = "…" + text[-110:].split(" ", 1)[-1]
+        self.setText(text)
+        self.adjustSize()
+        x = anchor.center().x() - self.width() // 2
+        y = anchor.top() - self.height() - 8
+        screen = QApplication.screenAt(anchor.center())
+        if screen and y < screen.availableGeometry().top():
+            y = anchor.bottom() + 8  # indicator near the top: show below it
+        self.move(x, y)
+        self.show()
 
 
 class RecordingIndicator(QWidget):

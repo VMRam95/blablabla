@@ -25,6 +25,10 @@ def foreground():
     return user32.GetForegroundWindow()
 
 
+def key_down(vk):
+    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
 def is_our_window(hwnd):
     pid = w.DWORD()
     user32.GetWindowThreadProcessId(hwnd, c.byref(pid))

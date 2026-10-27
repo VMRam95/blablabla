@@ -21,3 +21,8 @@ New-Item -ItemType Directory -Force $distPath | Out-Null
 Remove-Item -Recurse -Force (Join-Path $distPath 'Blablabla.exe'), (Join-Path $distPath '_internal') -ErrorAction SilentlyContinue
 Copy-Item -Recurse (Join-Path $buildPath 'onedir\Blablabla\*') $distPath
 Write-Host "Ejecutable: $distPath\Blablabla.exe"
+# Release asset: the app checks GitHub Releases for a "...-Windows.zip".
+$version = (Select-String -Path (Join-Path $PSScriptRoot 'app.py') -Pattern '^APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
+$zipPath = Join-Path $buildPath "Blablabla-v$version-Windows.zip"
+Compress-Archive -Path (Join-Path $distPath '*') -DestinationPath $zipPath -Force
+Write-Host "Paquete para publicar: $zipPath"

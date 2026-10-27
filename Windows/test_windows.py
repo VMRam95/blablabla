@@ -315,6 +315,48 @@ class QtInterfaceTests(unittest.TestCase):
         self.client.copy("España y café")
         self.assertEqual(QApplication.clipboard().text(), "España y café")
 
+    def test_hold_shortcut_records_until_release_and_tap_toggles(self):
+        client = self.client
+        def fake_toggle():
+            client.state = "listening" if client.state == "idle" else "idle"
+        with patch.object(client, "toggle", side_effect=fake_toggle), \
+             patch.object(client.hotkey, "poll", return_value=False), \
+             patch.object(native, "key_down", return_value=False):
+            client.shortcut_pressed()  # tap: released right away, keeps recording
+            client.poll()
+            self.assertEqual(client.state, "listening")
+            client.shortcut_pressed()  # second tap stops
+            self.assertEqual(client.state, "idle")
+            client.shortcut_pressed()  # hold: released after the threshold, stops
+            client.held_since -= app.HOLD_TO_TALK + 0.1
+            client.poll()
+            self.assertEqual(client.state, "idle")
+            self.assertIsNone(client.held_since)
+
+    def test_live_text_follows_the_indicator(self):
+        client = self.client
+        client.state = "listening"
+        client.update_indicator()
+        client.events.put(("transcript", "hola mundo"))
+        client.poll()
+        self.assertTrue(client.caption.isVisible())
+        self.assertEqual(client.caption.text(), "hola mundo")
+        self.assertLess(client.caption.geometry().bottom(), client.indicator.geometry().top())
+        client.state = "idle"
+        client.update_indicator()
+        self.assertFalse(client.caption.isVisible())
+
+    def test_update_check_only_offers_newer_windows_builds(self):
+        mac = {"tag_name": "v0.9.0", "html_url": "mac", "assets": [{"name": "Blablabla-v0.9.0-macOS.zip"}]}
+        win = {"tag_name": "v0.5.0", "html_url": "page", "assets": [{"name": "Blablabla-v0.5.0-Windows.zip"}]}
+        old = {"tag_name": "v0.4.4", "html_url": "old", "assets": [{"name": "Blablabla-v0.4.4-Windows.zip"}]}
+        self.assertEqual(app.newer_windows_release([mac, win, old], "0.4.4"), ("v0.5.0", "page"))
+        self.assertIsNone(app.newer_windows_release([mac, old], "0.4.4"))
+        self.assertIsNone(app.newer_windows_release([mac], "0.4.4"))
+        self.client.show_update(("v0.5.0", "page"), True)
+        self.assertEqual(self.client.update_button.text(), "Download ↗")
+        self.assertEqual(self.client.update_url, "page")
+
     def test_paste_restores_previous_clipboard(self):
         QApplication.clipboard().setText("anterior")
         self.client.session_copy_after = False

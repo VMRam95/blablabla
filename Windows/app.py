@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
 import winreg
 import winsound
 
@@ -22,9 +25,35 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFrame, 
 import sounddevice as sd
 import native
 from speech import Session
-from ui import BRAND, CYAN, GREEN, MICA_STYLE, PINK, YELLOW, STYLE, ComboBox, RecordingIndicator, Switch, divider, gradient_line, icon, label
+from ui import BRAND, CYAN, GREEN, MICA_STYLE, PINK, YELLOW, STYLE, ComboBox, LiveCaption, RecordingIndicator, Switch, divider, gradient_line, icon, label
 
 DATA_FILE = Path(os.environ["LOCALAPPDATA"]) / "Blablabla" / "windows.json"
+HOLD_TO_TALK = 0.4  # seconds; a shorter press is a tap that toggles
+APP_VERSION = "0.4.4"
+UPDATE_REPO = "arturogj92/blablabla"
+
+
+def version_tuple(tag):
+    return tuple(int(part) for part in re.findall(r"\d+", tag)[:3])
+
+
+def newer_windows_release(releases, current=APP_VERSION):
+    """Newest release that ships a Windows build and is newer than current, as (tag, page url)."""
+    for release in releases:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        if any("windows" in asset.get("name", "").lower() for asset in release.get("assets", [])):
+            if version_tuple(release["tag_name"]) > version_tuple(current):
+                return release["tag_name"], release["html_url"]
+            return None
+    return None
+
+
+def fetch_releases():
+    request = urllib.request.Request(f"https://api.github.com/repos/{UPDATE_REPO}/releases?per_page=10",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "Blablabla-Windows"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "Resources"
 
 
@@ -82,6 +111,7 @@ class App(QMainWindow):
         self.session = None
         self.state = "idle"
         self.target = self.last_target = None
+        self.held_since = None
         self.closing = self.disposed = self.collapsed = False
         self.display_limit = 10
         self.current_text = ""
@@ -98,7 +128,7 @@ class App(QMainWindow):
         self.app_icon = QIcon(str(RESOURCES / "icon_squircle.png"))
         self.setWindowIcon(self.app_icon)
         self.hotkey = native.Hotkey(self.data.get("shortcut_modifiers", 3), self.data.get("shortcut_key", 0x20))
-        self.hotkey_filter = HotkeyFilter(self.toggle)
+        self.hotkey_filter = HotkeyFilter(self.shortcut_pressed)
         QApplication.instance().installNativeEventFilter(self.hotkey_filter)
         try:
             key = native.unprotect_key(self.data.get("api_key", ""))
@@ -147,6 +177,7 @@ class App(QMainWindow):
         self.select_page(0)
 
         self.indicator = RecordingIndicator()
+        self.caption = LiveCaption()
         self.indicator.clicked.connect(self.toggle)
         self.indicator.position_changed.connect(self.save_indicator_position)
         self.indicator.draggable = self.free_position.isChecked()
@@ -155,7 +186,8 @@ class App(QMainWindow):
         self.tray.setToolTip("Blablabla")
         recording, busy = self.badged_icon(PINK), self.badged_icon(CYAN)
         self.tray_icons = {"idle": self.app_icon, "listening": recording, "connecting": busy, "stopping": busy}
-        self.tray.messageClicked.connect(lambda: (self.select_page(1), self.show_window()))
+        self.notice_page = 1
+        self.tray.messageClicked.connect(lambda: (self.select_page(self.notice_page), self.show_window()))
         menu = QMenu(self)
         menu.addAction("Show Blablabla", self.show_window)
         self.tray_record_action = menu.addAction("Start dictation", self.toggle)
@@ -389,7 +421,7 @@ class App(QMainWindow):
         shortcut.addLayout(keys_row)
         self.refresh_keycaps()
         shortcut.addWidget(divider())
-        shortcut.addWidget(label("Press once to record. Press again to finish.", "detail"))
+        shortcut.addWidget(label("Tap to start and tap again to finish, or hold it while you speak.", "detail"))
 
         microphone = self.card("Microphone")
         mic_row = QHBoxLayout()
@@ -447,6 +479,9 @@ class App(QMainWindow):
         indicator.addWidget(divider())
         self.free_position = self.switch_row(indicator, "Allow free positioning",
             "Drag the indicator anywhere on screen", "free_position")
+        indicator.addWidget(divider())
+        self.live_text = self.switch_row(indicator, "Show live text",
+            "Show the words as you speak next to the indicator", "live_text", True)
         self.indicator_only_recording.toggled.connect(lambda: self.update_indicator())
         self.free_position.toggled.connect(self.set_indicator_draggable)
         self.reset_position_button = button("Reset to default", self.reset_indicator_position)
@@ -462,11 +497,17 @@ class App(QMainWindow):
         row = QHBoxLayout()
         descriptions = QVBoxLayout()
         descriptions.setSpacing(2)
-        descriptions.addWidget(label("Windows preview", "row"))
-        descriptions.addWidget(label("Follow the project for new Windows releases", "detail"))
+        descriptions.addWidget(label(f"Blablabla {APP_VERSION} · Windows preview", "row"))
+        self.update_detail = label("Checks GitHub for new Windows releases", "detail")
+        descriptions.addWidget(self.update_detail)
         row.addLayout(descriptions, 1)
-        row.addWidget(button("View project ↗", lambda: self.open_url("https://github.com/arturogj92/blablabla")))
+        self.update_url = None
+        self.update_button = button("Check for updates", lambda: self.open_url(self.update_url)
+            if self.update_url else self.check_updates(manual=True))
+        row.addWidget(self.update_button)
         updates.addLayout(row)
+        updates.addWidget(button("View project ↗", lambda: self.open_url(f"https://github.com/{UPDATE_REPO}"), True),
+            0, Qt.AlignmentFlag.AlignLeft)
 
     def build_transcripts(self):
         self.search = QLineEdit()
@@ -613,7 +654,8 @@ class App(QMainWindow):
                 device=self.device_combo.currentText(), copy_only=self.copy_only.isChecked(),
                 copy_after=self.copy_after.isChecked(), launch_login=self.launch_login.isChecked(),
                 minimize_tray=self.minimize_tray.isChecked(), sounds_enabled=self.sounds_enabled.isChecked(),
-                indicator_only_recording=self.indicator_only_recording.isChecked(), free_position=self.free_position.isChecked())
+                indicator_only_recording=self.indicator_only_recording.isChecked(), free_position=self.free_position.isChecked(),
+                live_text=self.live_text.isChecked())
             for key, picker in self.sound_pickers.items():
                 self.data[key] = picker.currentData()
             save_data(self.data)
@@ -842,12 +884,23 @@ class App(QMainWindow):
         self.session = Session(self.key.text().strip(), self.device_combo.currentData(), self.events)
         self.session.start()
 
+    def shortcut_pressed(self):
+        """Tap toggles; holding the shortcut records until it is released."""
+        starting = self.state == "idle"
+        self.toggle()
+        self.held_since = time.monotonic() if starting and self.state != "idle" else None
+
     def poll(self):
         current = native.foreground()
         if current and not native.is_our_window(current):
             self.last_target = current
         if self.hotkey.poll():
-            self.toggle()
+            self.shortcut_pressed()
+        if self.held_since is not None and not native.key_down(self.data.get("shortcut_key", 0x20)):
+            held = time.monotonic() - self.held_since
+            self.held_since = None
+            if held >= HOLD_TO_TALK and self.state in ("connecting", "listening"):
+                self.toggle()
         while True:
             try:
                 kind, value = self.events.get_nowait()
@@ -859,15 +912,19 @@ class App(QMainWindow):
                 dot, description = self.microphone_permission
                 dot.setStyleSheet(f"color:{GREEN};font-size:12px;")
                 description.setText("Granted · microphone is recording")
-                self.set_status("Listening… press the shortcut to finish.")
+                self.set_status("Listening… tap the shortcut or release it to finish.")
                 self.feedback("start_sound")
                 self.update_recording_controls()
+            elif kind == "update":
+                self.show_update(*value)
             elif kind == "level":
                 self.indicator.level = value
             elif kind == "transcript":
                 self.current_text = value
                 self.preview.setText(value)
                 self.set_status(self.status_message)
+                if value and self.live_text.isChecked() and self.indicator.isVisible():
+                    self.caption.show_text(value, self.indicator.geometry())
             elif kind == "stopping":
                 self.state = "stopping"
                 self.set_status(value)
@@ -918,6 +975,7 @@ class App(QMainWindow):
             self.status_dot.setStyleSheet(f"color:{PINK};font-size:10px;")
             if not self.closing and not self.isVisible():
                 # A notification instead of popping the whole window up.
+                self.notice_page = 1  # Transcripts keeps the partial text
                 self.tray.showMessage("Blablabla", error, QSystemTrayIcon.MessageIcon.Warning, 8000)
         self.refresh_history()
         self.update_usage()
@@ -941,6 +999,8 @@ class App(QMainWindow):
         self.indicator.update()
         visible = not self.closing and (self.state != "idle" or not self.indicator_only_recording.isChecked())
         self.indicator.setVisible(visible)
+        if self.state == "idle" or self.closing:
+            self.caption.hide()
 
     def position_indicator(self):
         position = self.data.get("indicator_position") if self.free_position.isChecked() else None
@@ -1001,6 +1061,29 @@ class App(QMainWindow):
     def open_url(url):
         QDesktopServices.openUrl(QUrl(url))
 
+    def check_updates(self, manual=False):
+        self.update_detail.setText("Checking for updates…")
+        def work():
+            try:
+                result = newer_windows_release(fetch_releases())
+            except Exception:
+                result = "error"
+            self.events.put(("update", (result, manual)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_update(self, result, manual):
+        if result == "error":
+            self.update_detail.setText("Could not check for updates. Try again later.")
+        elif result:
+            tag, self.update_url = result
+            self.update_detail.setText(f"{tag} is available")
+            self.update_button.setText("Download ↗")
+            if not manual and not self.isVisible():
+                self.notice_page = 0
+                self.tray.showMessage("Blablabla", f"{tag} is available. Open Settings → Updates to download it.")
+        else:
+            self.update_detail.setText("You're up to date")
+
     def show_window(self):
         self.showNormal()
         self.raise_()
@@ -1060,6 +1143,7 @@ class App(QMainWindow):
         QApplication.instance().removeNativeEventFilter(self.hotkey_filter)
         self.indicator.animation.stop()
         self.indicator.close()
+        self.caption.close()
         self.tray.hide()
         self.close()
 
@@ -1077,6 +1161,7 @@ def main():
             f"{error}\n\nLocal data: {DATA_FILE}\nIf the file is damaged, keep a copy before moving it.")
         return 1
     window.show()
+    QTimer.singleShot(3000, window.check_updates)
     return qt_app.exec()
 
 
