@@ -100,8 +100,9 @@ user32.SendInput.argtypes = [w.UINT, c.POINTER(Input), c.c_int]
 user32.SendInput.restype = w.UINT
 
 
-def insert_text(text, target):
-    """Don't steal focus from a different app or touch the clipboard."""
+def paste(target):
+    """Send one Ctrl+V to target. Typing char by char made apps render in slow chunks.
+    Don't steal focus from a different app."""
     if not target or not user32.IsWindow(target):
         return False
     current = foreground()
@@ -115,16 +116,9 @@ def insert_text(text, target):
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.02)
-    encoded = text.encode("utf-16-le")
-    units = [int.from_bytes(encoded[i:i+2], "little") for i in range(0, len(encoded), 2)]
-    for offset in range(0, len(units), 32):
-        if foreground() != target:
-            return False
-        batch = []
-        for unit in units[offset:offset+32]:
-            batch.extend((Input(1, InputUnion(keyboard=KeyboardInput(0, unit, 4, 0, 0))),
-                          Input(1, InputUnion(keyboard=KeyboardInput(0, unit, 6, 0, 0)))))
-        inputs = (Input * len(batch))(*batch)
-        if user32.SendInput(len(batch), inputs, c.sizeof(Input)) != len(batch):
-            return False
-    return True
+    if foreground() != target:
+        return False
+    keys = [(0x11, 0), (0x56, 0), (0x56, 2), (0x11, 2)]  # Ctrl down, V down, V up, Ctrl up
+    inputs = (Input * 4)(*(Input(1, InputUnion(keyboard=KeyboardInput(vk, 0, flags, 0, 0)))
+                           for vk, flags in keys))
+    return user32.SendInput(4, inputs, c.sizeof(Input)) == 4

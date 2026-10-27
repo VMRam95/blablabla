@@ -11,7 +11,7 @@ import time
 import winreg
 import winsound
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QPoint, QSignalBlocker, Qt, QTimer, QUrl
+from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QMimeData, QPoint, QSignalBlocker, Qt, QTimer, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
     QKeySequenceEdit, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
@@ -847,7 +847,7 @@ class App(QMainWindow):
             if self.session_copy_only:
                 self.copy(text)
             else:
-                record["inserted"] = native.insert_text(text, self.target)
+                record["inserted"] = self.paste(text)
                 self.set_status("Texto escrito en la aplicación." if record["inserted"] else
                     "Texto guardado. Puedes copiarlo de Transcripts.")
                 if self.session_copy_after:
@@ -908,6 +908,20 @@ class App(QMainWindow):
         self.persist_settings()
         self.position_indicator()
         self.reset_position_button.hide()
+
+    def paste(self, text):
+        """Paste in one go via the clipboard, then restore what the user had there."""
+        clipboard = QApplication.clipboard()
+        previous = QMimeData()
+        source = clipboard.mimeData()
+        for fmt in source.formats() if source else ():
+            previous.setData(fmt, source.data(fmt))
+        clipboard.setText(text)
+        inserted = native.paste(self.target)
+        if not self.session_copy_after:
+            # The target reads the clipboard asynchronously; give it time first.
+            QTimer.singleShot(1500, lambda: clipboard.text() == text and clipboard.setMimeData(previous))
+        return inserted
 
     def copy(self, text):
         if text:

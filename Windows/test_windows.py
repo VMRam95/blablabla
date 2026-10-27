@@ -191,10 +191,13 @@ class WindowsTests(unittest.TestCase):
             self.assertEqual(ctypes.sizeof(native.Input), 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
             target = native.foreground()
             self.assertTrue(native.is_our_window(target))
-            self.assertTrue(native.insert_text("España, café 😀", target))
+            root.clipboard_clear()
+            root.clipboard_append("España, café 😀")
+            root.update()
+            self.assertTrue(native.paste(target))
             root.update()
             self.assertEqual(text.get("1.0", "end-1c"), "España, café 😀")
-            self.assertFalse(native.insert_text("should not type", None))
+            self.assertFalse(native.paste(None))
         finally:
             root.destroy()
 
@@ -228,7 +231,7 @@ class WindowsTests(unittest.TestCase):
             with patch.object(app, "load_data", return_value={"history": []}):
                 client = app.App()
             with patch.object(app, "save_data") as save, \
-                 patch.object(native, "insert_text") as insert:
+                 patch.object(native, "paste") as insert:
                 client.finish("Texto parcial", "Se perdió la conexión")
                 self.assertTrue(client.data["history"][0]["partial"])
                 self.assertEqual(client.data["history"][0]["text"], "Texto parcial")
@@ -283,6 +286,16 @@ class QtInterfaceTests(unittest.TestCase):
         self.assertEqual(self.client.history_layout.count(), 1)
         self.client.copy("España y café")
         self.assertEqual(QApplication.clipboard().text(), "España y café")
+
+    def test_paste_restores_previous_clipboard(self):
+        QApplication.clipboard().setText("anterior")
+        self.client.session_copy_after = False
+        with patch.object(native, "paste", return_value=True) as paste:
+            self.assertTrue(self.client.paste("dictado"))
+            self.assertEqual(QApplication.clipboard().text(), "dictado")
+        paste.assert_called_once()
+        QTest.qWait(1700)
+        self.assertEqual(QApplication.clipboard().text(), "anterior")
 
     def test_api_key_done_masks_and_preserves_saved_key(self):
         self.client.key.setText("new-test-key-never-real")
