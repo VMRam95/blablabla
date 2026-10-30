@@ -34,6 +34,8 @@ class Session:
         self.events = events
         self.stop_requested = threading.Event()
         self.finished = threading.Event()
+        self.captured_frames = 0
+        self.sample_rate = 1
         self.thread = threading.Thread(target=self.run, daemon=True)
 
     def start(self):
@@ -69,6 +71,11 @@ class Session:
         audio_received = threading.Event()
 
         def capture(data, frames, timing, status):
+            # The network may still be connecting. Never append speech recorded
+            # after the user pressed Stop to that session's buffered audio.
+            if self.stop_requested.is_set():
+                raise sd.CallbackStop
+            self.captured_frames += frames
             audio_received.set()
             samples = memoryview(data).cast("h")
             self.events.put(("level", max((abs(value) for value in samples[::64]), default=0) / 32768))
@@ -111,6 +118,7 @@ class Session:
             try:
                 info = sd.query_devices(self.device, "input")
                 rate = int(info["default_samplerate"])
+                self.sample_rate = rate
                 if not 8000 <= rate <= 96000:
                     raise RuntimeError("Choose a microphone with a sample rate between 8 and 96 kHz.")
                 stream = sd.RawInputStream(device=self.device, samplerate=rate,
@@ -143,6 +151,7 @@ class Session:
             begin = json.loads(socket.recv())
             if begin.get("type") != "Begin":
                 raise RuntimeError("AssemblyAI could not start the session: " + str(begin.get("error", "Unexpected response")))
+            self.events.put(("connected", None))
             socket.settimeout(0.5)
             receiver = threading.Thread(target=receive, daemon=True)
             receiver.start()
@@ -159,6 +168,7 @@ class Session:
                 except queue.Empty:
                     continue
             stream.stop()
+            self.events.put(("stopping", "Finalizing transcript…"))
             while not audio.empty():
                 socket.send_binary(audio.get_nowait())
             socket.send(json.dumps({"type": "ForceEndpoint"}))
@@ -199,4 +209,6 @@ class Session:
 
     def report(self, transcript, errors):
         error = errors.get() if not errors.empty() else None
+        if self.captured_frames:
+            self.events.put(("duration", self.captured_frames / self.sample_rate))
         self.events.put(("finished", (transcript.text, error)))

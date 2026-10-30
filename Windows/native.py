@@ -25,6 +25,18 @@ def foreground():
     return user32.GetForegroundWindow()
 
 
+def clipboard_sequence():
+    """Windows increments this for every clipboard change, including other apps."""
+    return user32.GetClipboardSequenceNumber()
+
+
+def animations_enabled():
+    enabled = w.BOOL(True)
+    # SPI_GETCLIENTAREAANIMATION: Windows accessibility preference.
+    user32.SystemParametersInfoW(0x1042, 0, c.byref(enabled), 0)
+    return bool(enabled.value)
+
+
 def key_down(vk):
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 

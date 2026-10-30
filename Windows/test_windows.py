@@ -5,19 +5,21 @@ from pathlib import Path
 import queue
 import tempfile
 import time
+import wave
 import tkinter as tk
 import unittest
 from unittest.mock import patch
 import urllib.error
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer, QVariantAnimation
+from PySide6.QtGui import QKeySequence, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QKeySequenceEdit
+from PySide6.QtWidgets import QApplication, QKeySequenceEdit, QPushButton
 
 import app
 import native
 import speech
+import ui
 
 
 class FakeSocket:
@@ -144,6 +146,29 @@ class ProtocolTests(unittest.TestCase):
             connection.assert_not_called()
         self.assertEqual(events.get_nowait(), ("finished", ("", None)))
 
+    def test_stop_while_connecting_excludes_later_audio_and_tracks_capture_duration(self):
+        events = queue.Queue()
+        session = speech.Session("dummy", None, events)
+        socket = FakeSocket()
+        stream = FakeStream(callback=lambda *args: None)
+        def make_stream(**kwargs):
+            stream.callback = kwargs["callback"]
+            return stream
+        def token():
+            session.stop()
+            # A device callback can still run while the connection is pending.
+            with self.assertRaises(speech.sd.CallbackStop):
+                stream.callback(bytes([1, 0]) * 2400, 2400, None, None)
+            return "token"
+        with patch.object(speech.sd, "query_devices", return_value={"default_samplerate": 48000}), \
+             patch.object(speech.sd, "RawInputStream", side_effect=make_stream), \
+             patch.object(session, "token", side_effect=token), \
+             patch.object(speech.websocket, "create_connection", return_value=socket):
+            session.run()
+        self.assertEqual([data for data in socket.sent if isinstance(data, bytes)], [bytes(4800)])
+        self.assertIn(("duration", 0.05), list(events.queue))
+        self.assertEqual(events.queue[-1], ("finished", ("¡Hola, mundo!", None)))
+
     def test_rejected_key_has_actionable_message_without_secret(self):
         session = speech.Session("secret-never-print", None, queue.Queue())
         with patch.object(speech.urllib.request, "urlopen", side_effect=
@@ -225,6 +250,18 @@ class WindowsTests(unittest.TestCase):
             app.save_data(data, path)
             self.assertEqual(app.load_data(path), data)
 
+    def test_all_bundled_sound_choices_resolve_to_short_pcm_audio(self):
+        tones = [value for _, value in app.SOUNDS if value.startswith("tone:")]
+        self.assertEqual(len(tones), 8)
+        for value in tones:
+            path = app.RESOURCES / "Sounds" / (value.removeprefix("tone:") + ".wav")
+            with self.subTest(sound=value), wave.open(str(path), "rb") as sound:
+                self.assertEqual((sound.getnchannels(), sound.getsampwidth()), (1, 2))
+                self.assertGreater(sound.getnframes() / sound.getframerate(), .05)
+                self.assertLess(sound.getnframes() / sound.getframerate(), .5)
+                samples = sound.readframes(sound.getnframes())
+                self.assertNotEqual(set(samples), {0})
+
     def test_app_launch_and_missing_key(self):
         qt_app = QApplication.instance() or QApplication([])
         qt_app.setStyle("Fusion")
@@ -288,16 +325,10 @@ class QtInterfaceTests(unittest.TestCase):
         self.qt_app.processEvents()
         self.storage.stop()
 
-    def test_sidebar_navigation_collapse_and_card_fit(self):
-        self.assertEqual(self.client.sidebar.width(), 200)
+    def test_top_navigation_and_compact_card_fit(self):
         QTest.mouseClick(self.client.nav[1][0], Qt.MouseButton.LeftButton)
         self.assertEqual(self.client.pages.currentIndex(), 1)
-        QTest.mouseClick(self.client.collapse_button, Qt.MouseButton.LeftButton)
-        QTest.qWait(300)  # animated
-        self.assertEqual(self.client.sidebar.width(), 54)
-        QTest.mouseClick(self.client.collapse_button, Qt.MouseButton.LeftButton)
-        QTest.qWait(300)
-        self.assertEqual(self.client.sidebar.width(), 200)
+        QTest.qWait(200)
         self.assertIsNone(self.client.pages.currentWidget().graphicsEffect())  # fade cleaned up
         self.client.select_page(0)
         for width in (700, 720, 980):
@@ -305,6 +336,113 @@ class QtInterfaceTests(unittest.TestCase):
             self.qt_app.processEvents()
             scroll = self.client.settings_page
             self.assertLessEqual(scroll.widget().width(), scroll.viewport().width())
+            for item, image, caption, badge, symbol in self.client.nav:
+                self.assertGreaterEqual(caption.width(), caption.fontMetrics().horizontalAdvance(caption.text()))
+
+    def test_closed_selectors_forward_wheel_without_changing_or_saving_selection(self):
+        self.client.sounds_enabled.setChecked(True)
+        mic = self.client.device_combo
+        mic.addItem("Test microphone A", 100)
+        mic.addItem("Test microphone B", 101)
+        scroll = self.client.settings_page
+        for picker in (mic, *self.client.sound_pickers.values()):
+            with self.subTest(picker=picker.accessibleName()):
+                scroll.ensureWidgetVisible(picker)
+                picker.setFocus()
+                self.qt_app.processEvents()
+                index = picker.currentIndex()
+                before = scroll.verticalScrollBar().value()
+                delta = 120 if before > 50 else -120
+                self.saved.reset_mock()
+                event = QWheelEvent(QPointF(5, 5), QPointF(picker.mapToGlobal(QPoint(5, 5))),
+                    QPoint(), QPoint(0, delta), Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+                with patch.object(ui, "animations_enabled", return_value=False):
+                    QApplication.sendEvent(picker, event)
+                self.qt_app.processEvents()
+                self.assertEqual(picker.currentIndex(), index)
+                self.saved.assert_not_called()
+                self.assertNotEqual(scroll.verticalScrollBar().value(), before)
+        mic.setFocus()
+        mic.setCurrentIndex(0)
+        QTest.keyClick(mic, Qt.Key.Key_Down)
+        self.assertEqual(mic.currentIndex(), 1)
+
+    def test_sound_preview_is_visible_and_uses_the_selected_bundled_file(self):
+        self.client.sounds_enabled.setChecked(True)
+        self.client.settings_page.ensureWidgetVisible(self.client.sound_options)
+        self.qt_app.processEvents()
+        for key, picker in self.client.sound_pickers.items():
+            picker.setCurrentIndex(picker.findData("tone:glass"))
+            preview = self.client.sound_previews[key]
+            self.assertTrue(preview.isVisible())
+            self.assertGreaterEqual(preview.width(), 92)
+            self.assertGreaterEqual(preview.height(), 42)
+            self.assertFalse(preview.icon().isNull())
+            self.assertEqual(self.client.data[key], "tone:glass")
+            with patch.object(app.winsound, "PlaySound") as play:
+                QTest.mouseClick(preview, Qt.MouseButton.LeftButton)
+                self.assertEqual(play.call_args.args[0], str(app.RESOURCES / "Sounds" / "glass.wav"))
+                self.assertTrue(play.call_args.args[1] & app.winsound.SND_FILENAME)
+            picker.setCurrentIndex(picker.findData("None"))
+            self.client.update_recording_controls()
+            self.assertFalse(preview.isEnabled())
+
+    def test_voice_dock_does_not_overlap_in_any_state_or_with_a_long_shortcut(self):
+        self.client.session_hint.setText("Ctrl + Alt + Shift + Windows + Space")
+        for width in (700, 840):
+            self.client.resize(width, 600)
+            for state in ("idle", "connecting", "listening", "stopping"):
+                self.client.state = state
+                self.client.cloud_connected = True
+                self.client.started_at = time.monotonic() - 359
+                self.client.update_recording_controls()
+                self.qt_app.processEvents()
+                with self.subTest(width=width, state=state):
+                    panel = self.client.voice_panel
+                    widgets = (self.client.session_heading, self.client.session_clock, self.client.button)
+                    rectangles = [widget.rect().translated(widget.mapTo(panel, QPoint())) for widget in widgets]
+                    for rect in rectangles:
+                        self.assertTrue(panel.rect().contains(rect))
+                    self.assertFalse(rectangles[0].intersects(rectangles[1]))
+                    self.assertFalse(rectangles[1].intersects(rectangles[2]))
+                    self.assertGreaterEqual(self.client.session_heading.height(),
+                        self.client.session_heading.fontMetrics().height())
+
+    def test_wheel_scroll_reverses_and_keyboard_interrupts_it(self):
+        scroll = self.client.settings_page
+        bar = scroll.verticalScrollBar()
+        bar.setValue(150)
+        def wheel(angle, pixels=0):
+            event = QWheelEvent(QPointF(40, 40), QPointF(40, 40), QPoint(0, pixels),
+                QPoint(0, angle), Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.NoScrollPhase, False)
+            QApplication.sendEvent(scroll.viewport(), event)
+        with patch.object(ui, "animations_enabled", return_value=True):
+            wheel(-120)
+            QTest.qWait(50)
+            self.assertGreater(bar.value(), 150)
+            self.assertLess(bar.value(), scroll.scroll_target)
+            before_reversal = bar.value()
+            wheel(120)
+            self.assertLess(scroll.scroll_target, before_reversal)
+            before_key = bar.value()
+            QTest.keyClick(scroll, Qt.Key.Key_PageDown)
+            self.assertEqual(scroll.scroll_motion.state(), QVariantAnimation.State.Stopped)
+            self.assertGreater(bar.value(), before_key)
+            wheel(120)
+            wheel(0, 20)  # high-resolution touchpad input stays on Qt's native path
+            self.assertEqual(scroll.scroll_motion.state(), QVariantAnimation.State.Stopped)
+
+    def test_reduced_motion_keeps_navigation_and_voice_feedback_immediate(self):
+        with patch.object(ui, "animations_enabled", return_value=False):
+            self.client.select_page(1)
+            self.assertIsNone(self.client.pages.currentWidget().graphicsEffect())
+            self.client.audio_meter.set_level(.8)
+            self.assertEqual(self.client.audio_meter.shown_level, .8)
+            self.client.voice_panel.set_state("listening")
+            self.assertEqual(self.client.voice_panel.tint, 1)
+            self.assertEqual(self.client.voice_panel.transition.state(), QVariantAnimation.State.Stopped)
 
     def test_transcript_search_and_copy(self):
         self.client.select_page(1)
@@ -314,6 +452,51 @@ class QtInterfaceTests(unittest.TestCase):
         self.assertEqual(self.client.history_layout.count(), 1)
         self.client.copy("España y café")
         self.assertEqual(QApplication.clipboard().text(), "España y café")
+
+    def test_copy_action_is_visible_and_confirms_the_selected_transcript(self):
+        self.client.select_page(1)
+        self.qt_app.processEvents()
+        card = self.client.history_layout.itemAt(0).widget()
+        copy_button = next(b for b in card.findChildren(QPushButton) if b.property("role") == "copy")
+        self.assertTrue(copy_button.isVisible())
+        self.assertGreaterEqual(copy_button.height(), 42)
+        self.assertGreaterEqual(copy_button.width(), 118)
+        QTest.mouseClick(copy_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(QApplication.clipboard().text(), "España y café")
+        self.assertEqual(copy_button.text(), "Copied")
+        QTest.qWait(1950)
+        self.assertEqual(copy_button.text(), "Copy text")
+
+    def test_live_copy_and_record_button_are_available_from_all_pages(self):
+        self.client.live_card.show()
+        self.assertFalse(self.client.live_copy.isEnabled())
+        self.client.events.put(("transcript", "Texto en directo"))
+        self.client.poll()
+        self.assertTrue(self.client.live_copy.isEnabled())
+        self.client.select_page(1)
+        QTest.mouseClick(self.client.live_copy, Qt.MouseButton.LeftButton)
+        self.assertEqual(QApplication.clipboard().text(), "Texto en directo")
+        for page in range(3):
+            self.client.select_page(page)
+            self.assertTrue(self.client.button.isVisible())
+
+    def test_long_transcripts_fit_a_compact_window_and_keep_copy_accessible(self):
+        self.client.data["history"] = [{"text": "https://example.com/" + "longpath" * 80,
+            "date": "2026-10-30T10:00:00", "partial": True}]
+        self.client.refresh_history()
+        self.client.select_page(1)
+        self.client.resize(700, 600)
+        self.qt_app.processEvents()
+        page = self.client.transcripts_page
+        self.assertLessEqual(page.widget().width(), page.viewport().width())
+        card = self.client.history_layout.itemAt(0).widget()
+        copy_button = next(b for b in card.findChildren(QPushButton) if b.property("role") == "copy")
+        self.assertTrue(card.rect().contains(copy_button.geometry()))
+        self.client.live_card.show()
+        self.client.events.put(("transcript", "unbroken" * 100))
+        self.client.poll()
+        self.qt_app.processEvents()
+        self.assertLessEqual(page.widget().width(), page.viewport().width())
 
     def test_hold_shortcut_records_until_release_and_tap_toggles(self):
         client = self.client
@@ -366,6 +549,37 @@ class QtInterfaceTests(unittest.TestCase):
         paste.assert_called_once()
         QTest.qWait(1700)
         self.assertEqual(QApplication.clipboard().text(), "anterior")
+
+    def test_manual_copy_of_identical_transcript_cancels_clipboard_restoration(self):
+        QApplication.clipboard().setText("anterior")
+        self.client.session_copy_after = False
+        with patch.object(native, "paste", return_value=True):
+            self.client.paste("dictado")
+        self.client.copy("dictado")
+        QTest.qWait(1700)
+        self.assertEqual(QApplication.clipboard().text(), "dictado")
+
+    def test_external_clipboard_change_is_preserved(self):
+        QApplication.clipboard().setText("anterior")
+        self.client.session_copy_after = False
+        with patch.object(native, "paste", return_value=True):
+            self.client.paste("dictado")
+        QApplication.clipboard().setText("copiado en otra aplicación")
+        QTest.qWait(1700)
+        self.assertEqual(QApplication.clipboard().text(), "copiado en otra aplicación")
+
+    def test_rapid_pastes_restore_original_clipboard_including_html(self):
+        original = app.QMimeData()
+        original.setText("anterior")
+        original.setHtml("<b>anterior</b>")
+        QApplication.clipboard().setMimeData(original)
+        self.client.session_copy_after = False
+        with patch.object(native, "paste", return_value=True):
+            self.client.paste("primer dictado")
+            self.client.paste("segundo dictado")
+        QTest.qWait(1700)
+        self.assertEqual(QApplication.clipboard().text(), "anterior")
+        self.assertEqual(QApplication.clipboard().mimeData().html(), "<b>anterior</b>")
 
     def test_api_key_done_masks_and_preserves_saved_key(self):
         self.client.key.setText("new-test-key-never-real")

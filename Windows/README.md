@@ -1,8 +1,25 @@
 # Blablabla para Windows 11
 
-Cliente nativo Qt de escritorio, con el diseño del cliente Swift/macOS:
-barra lateral plegable, logo original, paleta oscura, tarjetas redondeadas,
-interruptores, teclas del atajo y páginas **Settings**, **Transcripts** y **Permissions**.
+Cliente nativo Qt de escritorio, con la identidad del cliente Swift/macOS:
+barra lateral plegable, logo original y paleta oscura con acentos cian, verde,
+amarillo y rosa. La versión 0.5.0 amplía la tipografía, las áreas de pulsación y
+la separación entre contenidos en **Settings**, **Transcripts** y **Permissions**.
+La 0.5.1 mantiene esos controles y su distribución, con acabado carbón, superficies
+en capas, onda de marca en la cabecera y tamaño inicial de 840 × 740. El hover,
+las transiciones y el nivel de voz tienen una respuesta breve; la rueda se desplaza
+suavemente y el panel táctil conserva el comportamiento de Qt. Las animaciones
+decorativas respetan la preferencia de Windows y no hay animación continua en reposo.
+La 0.6.0 cambia la composición a navegación superior y control de voz inferior,
+liberando ancho para el contenido. Añade ocho tonos cortos propios, botones **Play**
+visibles y protege todos los selectores cerrados frente a cambios accidentales con
+la rueda: el gesto desplaza la página. La selección con teclado y la lista abierta
+mantienen su funcionamiento. La barra de voz se comprueba en todos sus estados a
+700 × 600, incluido un atajo largo y el cronómetro.
+La 0.7.0 añade **Compact mode**, junto a **Start dictation**: la ventana completa
+se oculta y queda un panel flotante de 320 × 112 con la onda, estado, tiempo,
+inicio/parada y texto en directo. Puede arrastrarse; recuerda el modo y la posición
+al reiniciar. El botón de ampliar vuelve a la interfaz completa. Comparte la sesión
+de dictado y el atajo, y sustituye el indicador pequeño mientras está activo.
 La rama de trabajo es `feat/windows-local`; el código original de macOS permanece
 en `Sources/`. No requiere Xcode, Electron ni un servidor local.
 
@@ -31,6 +48,9 @@ Para ejecutar desde código fuente:
 
 También puedes usar **Start dictation / Stop dictation** en la ventana o hacer
 clic en la pequeña onda flotante sobre la barra de tareas.
+**Compact mode** mantiene los controles y las últimas palabras en una mini ventana
+siempre visible, sin activar otra ventana al comenzar el dictado. **Expand Blablabla**
+recupera la interfaz completa; el texto y la sesión se conservan al cambiar de modo.
 El botón utiliza como destino la última ventana externa que tuvo el foco mientras
 Blablabla estaba abierta. Si no hay destino, conserva el texto para copiarlo.
 
@@ -53,6 +73,14 @@ apunta el acceso; puedes copiarlo antes a una carpeta permanente de tu usuario.
 
 ## Qué incluye
 
+- Barra de dictado permanente en todas las páginas, con nivel de entrada,
+  tiempo transcurrido y estados de captura, conexión y finalización.
+- Botones **Copy text** de al menos 118 × 42 píxeles lógicos, siempre visibles
+  en la cabecera de cada transcripción. Confirman **Copied** durante 1,8 s;
+  el texto en directo también se puede copiar cuando está disponible.
+- Ajustes de clave, micrófono, atajo y entrega al principio; foco de teclado visible,
+  contraste reforzado y disposición comprobada desde ventanas de 700 × 600.
+
 - Grabación de micrófono mono PCM de 16 bits, a la frecuencia nativa del dispositivo.
 - Transcripción en directo mediante AssemblyAI Universal Streaming v3,
   modelo `universal-3-6-pro`, con idiomas detectados automáticamente.
@@ -60,9 +88,14 @@ apunta el acceso; puedes copiarlo antes a una carpeta permanente de tu usuario.
   Toque corto: empieza y otro toque termina. Mantenerlo pulsado: graba mientras lo
   mantienes y pega al soltarlo. La grabación empieza al instante mientras conecta.
 - Pegado instantáneo con un único Ctrl+V; el portapapeles anterior se restaura a los 1,5 s.
+  Una copia manual o un cambio desde otra aplicación cancela esa restauración.
+  Los pegados consecutivos conservan el contenido original, incluido su formato HTML.
 - Modos **Clipboard only**, **Also copy to clipboard** y copia manual de transcripciones.
 - Historial local y clave cifrada con Windows DPAPI para el usuario actual.
 - Recuperación de texto parcial en el historial cuando falla la conexión.
+- Parar durante la conexión detiene la captura en la siguiente llamada del dispositivo
+  y entrega únicamente el audio anterior a la parada. El uso local contabiliza los
+  fotogramas capturados, sin sumar la espera de red al tiempo de grabación.
 - Indicador flotante con la onda y el gradiente originales, animado a 60 fps con el nivel
   del micrófono, y texto en vivo junto al indicador (**Show live text**).
 - Fondo Mica de Windows 11 (tema opaco en versiones anteriores) y animaciones suaves.
@@ -115,6 +148,25 @@ bits copia la carpeta `dist` entera, sin necesidad de instalar Python.
 
 ## Verificación
 
+Para cambios de interfaz locales, usa primero las comprobaciones focalizadas
+**headless**, sin ventanas, reproducción real ni registro/envío de atajos al escritorio:
+
+```powershell
+.\Windows\.venv\Scripts\python.exe .\Windows\check_ui_headless.py
+```
+
+Ejecuta cinco casos afectados (navegación, rueda, Play, estados de voz y archivos
+de audio). Se puede pasar el nombre de uno de los casos definidos en `CHECKS` para
+comprobar solo ese comportamiento. No ejecuta la suite completa.
+
+Los ocho tonos incluidos se regeneran con `Windows/generate_sounds.py`, usando solo
+la biblioteca estándar. Para actualizar la app sin abrir una ventana ni quitar foco,
+puede iniciarse con `Blablabla.exe --background`; se abre desde la bandeja.
+
+La suite completa de integración con el escritorio es opcional y **abre ventanas
+y envía teclas reales**. Ejecútala solo cuando se quiera comprobar expresamente
+esa integración:
+
 Cierra otras instancias de Blablabla antes de ejecutar las pruebas, para que el
 atajo global esté libre. La instalación de Python para pruebas debe incluir
 Tcl/Tk: se usa un campo de texto real para comprobar la inserción Unicode.
@@ -136,13 +188,26 @@ una frase corta en español, varias frases con pausas, copiar desde el historial
 dictado en otra aplicación con la ventana minimizada y parada/cierre durante una sesión.
 
 En este equipo (Windows 11 Pro, 10/10/2026) se ha generado el EXE y comprobado
-su arranque. Se ha sustituido la interfaz inicial por el diseño original de macOS
-usando Qt y comprobado mediante capturas renderizadas. Pasan las 21 pruebas.
+su arranque. La interfaz usa Qt y se comprueba mediante capturas renderizadas.
+El rediseño 0.5.0 añade pruebas de copia visible y confirmación, ventanas compactas
+con texto largo, protección del portapapeles y parada durante la conexión.
 Windows no tiene micrófono predeterminado y
 el endpoint Realtek de micrófono anunciado por el controlador no entrega buffers
 de audio. Hay que conectar/habilitar una entrada funcional y seleccionarla.
 La aplicación comprueba que recibe audio antes de abrir la sesión de AssemblyAI.
 El dictado cloud sigue pendiente de prueba con micrófono y clave API reales.
+
+Verificación del rediseño (30/10/2026): pasan las **33 pruebas** de protocolo,
+interfaz Qt y Windows, incluida inserción Unicode real y recepción del atajo global.
+Se han revisado capturas de historial, ajustes, permisos, copia confirmada y dictado
+simulado a 1020 × 820 y 700 × 600, con datos ficticios. Se genera el ejecutable
+local 0.5.0; las pruebas no consumen crédito de AssemblyAI. El dictado con voz real
+requiere un micrófono funcional seleccionado y una comprobación manual adicional.
+
+Revisión visual 0.5.1 (30/10/2026): **35 pruebas** satisfactorias. Incluyen inversión
+del desplazamiento con rueda, interrupción por teclado, ruta de panel táctil y
+respuesta inmediata al desactivar animaciones. Capturas revisadas a 840 × 740 y
+700 × 600; el contenido y la distribución de ajustes e historial se conservan.
 
 Referencias: [protocolo AssemblyAI](https://www.assemblyai.com/docs/streaming/message-sequence),
 [API y modelos](https://www.assemblyai.com/docs/streaming/api-spec/streaming-websocket),

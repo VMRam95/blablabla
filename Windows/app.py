@@ -16,20 +16,22 @@ import winsound
 
 from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve, QEvent, QMimeData, QPoint,
     QSignalBlocker, Qt, QTimer, QUrl, QVariantAnimation)
-from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence,
+from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QIcon, QKeySequence,
     QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
     QKeySequenceEdit, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QScrollArea, QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
+    QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import sounddevice as sd
 import native
 from speech import Session
-from ui import BRAND, CYAN, GREEN, MICA_STYLE, PINK, YELLOW, STYLE, ComboBox, LiveCaption, RecordingIndicator, Switch, divider, gradient_line, icon, label
+from ui import (BRAND, CYAN, GREEN, MICA_STYLE, PINK, YELLOW, STYLE, AudioMeter, ComboBox, CompactPanel,
+    LiveCaption, MotionButton, RecordingIndicator, SmoothScrollArea, StudioBackdrop, Switch,
+    VoicePanel, divider, icon, label, motion_duration)
 
 DATA_FILE = Path(os.environ["LOCALAPPDATA"]) / "Blablabla" / "windows.json"
 HOLD_TO_TALK = 0.4  # seconds; a shorter press is a tap that toggles
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.7.0"
 UPDATE_REPO = "arturogj92/blablabla"
 
 
@@ -55,6 +57,11 @@ def fetch_releases():
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "Resources"
+SOUNDS = (("None", "None"), ("Soft tap", "tone:soft-tap"), ("Glass", "tone:glass"),
+    ("Bloom", "tone:bloom"), ("Rise", "tone:rise"), ("Fall", "tone:fall"),
+    ("Pulse", "tone:pulse"), ("Two notes", "tone:two-notes"), ("Air", "tone:air"),
+    ("Windows chime", "SystemAsterisk"), ("Windows notification", "SystemExclamation"),
+    ("Windows alert", "SystemHand"))
 
 
 def load_data(path=DATA_FILE):
@@ -74,7 +81,7 @@ def save_data(data, path=DATA_FILE):
 
 
 def button(text, action, text_only=False):
-    widget = QPushButton(text)
+    widget = MotionButton(text)
     widget.setCursor(Qt.CursorShape.PointingHandCursor)
     if text_only:
         widget.setProperty("role", "text")
@@ -112,14 +119,22 @@ class App(QMainWindow):
         self.state = "idle"
         self.target = self.last_target = None
         self.held_since = None
-        self.closing = self.disposed = self.collapsed = False
+        self.closing = self.disposed = False
         self.display_limit = 10
         self.current_text = ""
+        self.compact_mode = bool(self.data.get("compact_mode", False))
+        self.recorded_seconds = None
+        self.cloud_connected = False
         self.started_at = None
         self.settings_controls = []
         self.status_message = "Ready to dictate"
+        self.clipboard_revision = 0
+        self.pending_clipboard = None
+        self.clipboard_timer = QTimer(self)
+        self.clipboard_timer.setSingleShot(True)
+        self.clipboard_timer.timeout.connect(self.restore_clipboard)
         self.setWindowTitle("Blablabla")
-        self.resize(720, 760)
+        self.resize(840, 740)
         self.setMinimumSize(700, 600)
         self.setStyleSheet(STYLE)
         # Mica needs Windows 11 22H2+; must be set before the native window exists.
@@ -144,30 +159,29 @@ class App(QMainWindow):
         self.key_mask = label("")
         self.key_mask.setStyleSheet("background:#242429;border-radius:8px;padding:8px;color:#85858d;font-family:Consolas;")
 
-        central = QWidget()
+        central = StudioBackdrop()
         self.setCentralWidget(central)
-        shell = QHBoxLayout(central)
-        shell.setContentsMargins(0, 0, 0, 0)
-        shell.setSpacing(0)
-        self.sidebar = QFrame()
-        self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(200)
-        self.sidebar_slide = QVariantAnimation(self)
-        self.sidebar_slide.setDuration(180)
-        self.sidebar_slide.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.sidebar_slide.valueChanged.connect(self.sidebar.setFixedWidth)
-        shell.addWidget(self.sidebar)
-        self.build_sidebar()
+        shell = QVBoxLayout(central)
+        shell.setContentsMargins(16, 10, 16, 16)
+        shell.setSpacing(12)
+        self.build_navigation(shell)
         self.fading = None
         self.page_fade = QVariantAnimation(self)
-        self.page_fade.setDuration(160)
+        self.page_fade.setDuration(motion_duration(160))
         self.page_fade.setStartValue(0.0)
         self.page_fade.setEndValue(1.0)
         self.page_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.page_fade.valueChanged.connect(self.fade_step)
         self.page_fade.finished.connect(self.end_fade)
         self.pages = QStackedWidget()
-        shell.addWidget(self.pages, 1)
+        workspace = QWidget()
+        workspace.setObjectName("workspace")
+        content = QVBoxLayout(workspace)
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(0)
+        content.addWidget(self.pages, 1)
+        shell.addWidget(workspace, 1)
+        self.build_session_panel(shell)
         self.settings_page, self.settings_layout = self.page("Settings")
         self.transcripts_page, self.transcripts_layout = self.page("Transcripts", clear=True)
         self.permissions_page, self.permissions_layout = self.page("Permissions", refresh=True)
@@ -178,6 +192,11 @@ class App(QMainWindow):
 
         self.indicator = RecordingIndicator()
         self.caption = LiveCaption()
+        self.compact = CompactPanel()
+        self.compact.toggle_requested.connect(self.toggle)
+        self.compact.expand_requested.connect(self.show_window)
+        self.compact.position_changed.connect(self.save_compact_position)
+        self.position_compact()
         self.indicator.clicked.connect(self.toggle)
         self.indicator.position_changed.connect(self.save_indicator_position)
         self.indicator.draggable = self.free_position.isChecked()
@@ -200,6 +219,9 @@ class App(QMainWindow):
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll)
         self.poll_timer.start(40)
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self.update_session_clock)
+        self.clock_timer.start(1000)
         self.refresh_devices()
         self.refresh_history()
         self.update_usage()
@@ -209,6 +231,96 @@ class App(QMainWindow):
         self.set_status(self.status_message)
         self.update_indicator()
         self.dark_titlebar()
+
+    def build_session_panel(self, content):
+        container = QWidget()
+        inset = QVBoxLayout(container)
+        inset.setContentsMargins(0, 0, 0, 0)
+        panel = self.voice_panel = VoicePanel()
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(18, 16, 18, 16)
+        column.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self.audio_meter = AudioMeter()
+        row.addWidget(self.audio_meter)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.session_heading = label("Ready to dictate", "section")
+        self.session_hint = label(self.data.get("shortcut_label", "Ctrl + Alt + Space"), "detail")
+        for text in (self.session_heading, self.session_hint):
+            text.setMinimumWidth(0)
+            text.setWordWrap(True)
+            text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.session_hint.setWordWrap(False)
+        titles.addWidget(self.session_heading)
+        titles.addWidget(self.session_hint)
+        row.addLayout(titles, 1)
+        self.session_clock = label("", "detail")
+        self.session_clock.setStyleSheet("font-family:Consolas;color:#bcbcc6;")
+        self.session_clock.setFixedWidth(52)
+        row.addWidget(self.session_clock)
+        self.button = button("Start dictation", self.toggle)
+        self.button.setObjectName("recordButton")
+        self.button.setProperty("role", "primary")
+        self.button.setIcon(icon("mic", "#092328", 17))
+        self.button.setMinimumSize(155, 44)
+        row.addWidget(self.button)
+        self.compact_button = button("Compact mode", lambda: self.set_compact_mode(True))
+        self.compact_button.setIcon(icon("compact", "#d5d5df", 16))
+        self.compact_button.setMinimumHeight(44)
+        row.addWidget(self.compact_button)
+        column.addLayout(row)
+        self.session_status = label(self.status_message, "detail")
+        self.session_status.setWordWrap(True)
+        self.session_status.setMinimumWidth(0)
+        self.session_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.session_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        column.addWidget(self.session_status)
+        inset.addWidget(panel)
+        content.addWidget(container)
+
+    def update_session_clock(self):
+        seconds = max(0, int(time.monotonic() - self.started_at)) if self.started_at is not None else 0
+        self.session_clock.setText(f"{seconds//60:02}:{seconds%60:02}" if self.state != "idle" else "")
+        self.update_compact()
+
+    def update_compact(self):
+        if hasattr(self, "compact"):
+            self.compact.set_session(self.state, self.current_text if self.live_text.isChecked() else "", self.status_message,
+                self.data.get("shortcut_label", "Ctrl + Alt + Space"), self.session_clock.text(), self.closing)
+
+    def position_compact(self):
+        position = self.data.get("compact_position")
+        if isinstance(position, list) and len(position) == 2 and all(isinstance(value, int) for value in position):
+            screen = QApplication.screenAt(QPoint(*position))
+            if screen and screen.availableGeometry().contains(QPoint(position[0] + self.compact.width() - 1,
+                    position[1] + self.compact.height() - 1)):
+                self.compact.move(*position)
+                return
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        bounds = screen.availableGeometry()
+        self.compact.move(bounds.center().x() - self.compact.width()//2,
+            bounds.bottom() - self.compact.height() - 16)
+
+    def save_compact_preferences(self):
+        try:
+            save_data(self.data)
+        except OSError:
+            self.set_status("Could not save compact mode preferences. They will reset on restart.")
+
+    def save_compact_position(self):
+        self.data["compact_position"] = [self.compact.x(), self.compact.y()]
+        self.save_compact_preferences()
+
+    def set_compact_mode(self, enabled):
+        self.compact_mode = enabled
+        self.data["compact_mode"] = enabled
+        self.save_compact_preferences()
+        if enabled:
+            self.position_compact()
+            self.hide()
+        self.update_indicator()
 
     def badged_icon(self, color):
         """App icon with a status dot, so the tray shows when it is recording."""
@@ -221,108 +333,81 @@ class App(QMainWindow):
         painter.end()
         return QIcon(pixmap)
 
-    def build_sidebar(self):
-        column = QVBoxLayout(self.sidebar)
-        column.setContentsMargins(10, 10, 10, 0)
-        column.setSpacing(0)
-        top = QHBoxLayout()
-        top.addStretch()
-        self.collapse_button = button("", self.toggle_sidebar, True)
-        self.collapse_button.setIcon(icon("sidebar", size=14))
-        self.collapse_button.setFixedSize(26, 26)
-        self.collapse_button.setToolTip("Collapse sidebar")
-        top.addWidget(self.collapse_button)
-        column.addLayout(top)
-        self.brand = QWidget()
-        branding = QVBoxLayout(self.brand)
-        branding.setContentsMargins(0, 0, 0, 16)
-        branding.setSpacing(5)
+    def build_navigation(self, shell):
+        row = QHBoxLayout()
+        row.setContentsMargins(6, 0, 0, 0)
+        row.setSpacing(10)
         logo = QLabel()
-        logo.setPixmap(QPixmap(str(RESOURCES / "Assets.xcassets/LogoWave.imageset/logo_wave.png"))
-            .scaled(90, 55, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setFixedHeight(55)
-        branding.addWidget(logo)
-        title = label("Blablabla")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size:14px;font-weight:600;color:#e5e5e8;")
-        branding.addWidget(title)
-        version = label("Windows preview", "detail")
-        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        version.setStyleSheet("font-size:10px;color:#54545b;")
-        branding.addWidget(version)
-        column.addWidget(self.brand)
-        gradient_container = QWidget()
-        gradient_layout = QHBoxLayout(gradient_container)
-        gradient_layout.setContentsMargins(10, 0, 10, 0)
-        gradient_layout.addWidget(gradient_line())
-        column.addWidget(gradient_container)
-        column.addSpacing(14)
+        logo.setPixmap(QPixmap(str(RESOURCES / "icon_squircle.png"))
+            .scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        logo.setFixedSize(32, 36)
+        row.addWidget(logo)
+        wordmark = label("Blablabla")
+        wordmark.setStyleSheet("font-size:17px;font-weight:700;color:#efeff4;")
+        row.addWidget(wordmark)
+        row.addStretch()
+        navigation = QFrame()
+        navigation.setObjectName("navigation")
+        tabs = QHBoxLayout(navigation)
+        tabs.setContentsMargins(4, 4, 4, 4)
+        tabs.setSpacing(3)
         self.nav = []
         for index, (name, symbol) in enumerate((("Settings", "settings"), ("Transcripts", "transcripts"), ("Permissions", "permissions"))):
             item = button("", lambda checked=False, i=index: self.select_page(i))
             item.setProperty("role", "nav")
             item.setCheckable(True)
-            item.setFixedHeight(34)
+            item.setMinimumWidth((118, 145, 132)[index])
             item.setAccessibleName(name)
             item.setToolTip(name)
-            row = QHBoxLayout(item)
-            row.setContentsMargins(10, 0, 10, 0)
-            row.setSpacing(9)
+            contents = QHBoxLayout(item)
+            contents.setContentsMargins(10, 0, 10, 0)
+            contents.setSpacing(7)
             image = QLabel()
             image.setFixedSize(18, 18)
-            image.setPixmap(icon(symbol, size=14).pixmap(18, 18))
+            image.setPixmap(icon(symbol, size=16).pixmap(18, 18))
             caption = label(name)
-            row.addWidget(image)
-            row.addWidget(caption)
-            row.addStretch()
+            contents.addWidget(image)
+            contents.addWidget(caption)
             badge = label("", "badge")
             badge.hide()
-            row.addWidget(badge)
+            contents.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
             self.nav.append((item, image, caption, badge, symbol))
-            column.addWidget(item)
-            column.addSpacing(2)
-        column.addStretch()
-        column.addWidget(divider())
-        status_row = QHBoxLayout()
-        status_row.setContentsMargins(4, 10, 4, 10)
-        status_row.setSpacing(6)
-        self.status_dot = label("●")
-        self.status_dot.setStyleSheet(f"color:{GREEN};font-size:10px;")
-        self.status_dot.setFixedWidth(8)
-        self.status_label = label("", "detail")
-        self.status_label.setMinimumWidth(0)
-        status_row.addWidget(self.status_dot)
-        status_row.addWidget(self.status_label, 1)
-        column.addLayout(status_row)
+            tabs.addWidget(item)
+        row.addWidget(navigation)
+        self.status_dot = label("\u25cf")
+        self.status_dot.setFixedWidth(10)
+        self.status_dot.setToolTip("Dictation status")
+        row.addWidget(self.status_dot)
+        shell.addLayout(row)
 
     def page(self, title, clear=False, refresh=False):
-        scroll = QScrollArea()
+        scroll = SmoothScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         body.setObjectName("page")
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setContentsMargins(24, 26, 24, 28)
         layout.setSpacing(20)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         header = QHBoxLayout()
         header.addWidget(label(title, "title"))
         if clear:
             self.history_count = label("", "detail")
-            self.history_count.setStyleSheet("font-size:14px;font-weight:600;color:#66666d;")
-            header.addWidget(self.history_count)
+            self.history_count.setProperty("role", "badge")
+            header.addWidget(self.history_count, 0, Qt.AlignmentFlag.AlignVCenter)
         header.addStretch()
         if clear:
-            self.clear_button = button("Clear All", self.clear_history)
+            self.clear_button = button("Clear history", self.clear_history, True)
             header.addWidget(self.clear_button)
         elif refresh:
             header.addWidget(button("Refresh", self.refresh_permissions))
-        else:
-            self.button = button("Start dictation", self.toggle)
-            self.button.setIcon(icon("mic", "#bdbdc5", 12))
-            header.addWidget(self.button)
         layout.addLayout(header)
+        subtitle = label({"Settings": "Make dictation work the way you do.",
+            "Transcripts": "Your words, ready to use. Copy any transcript in one click.",
+            "Permissions": "Check what Blablabla needs to capture and deliver your words."}[title], "detail")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
         scroll.setWidget(body)
         self.pages.addWidget(scroll)
         return scroll, layout
@@ -332,8 +417,8 @@ class App(QMainWindow):
         frame.setObjectName("card")
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
         if title:
             layout.addWidget(label(title, "section"))
         (parent_layout or self.settings_layout).addWidget(frame)
@@ -449,23 +534,32 @@ class App(QMainWindow):
         sound_rows.setSpacing(10)
         sound_rows.addWidget(divider())
         self.sound_pickers = {}
+        self.sound_previews = {}
         for title, key, default in (("Start recording", "start_sound", "SystemAsterisk"),
                                     ("Stop recording", "stop_sound", "SystemExclamation")):
             row = QHBoxLayout()
             row.addWidget(label(title, "row"), 1)
             picker = ComboBox()
-            for name, sound in (("None", "None"), ("Chime", "SystemAsterisk"),
-                                ("Notification", "SystemExclamation"), ("Alert", "SystemHand")):
+            picker.setAccessibleName(f"{title} sound")
+            for name, sound in SOUNDS:
                 picker.addItem(name, sound)
             picker.setCurrentIndex(max(0, picker.findData(self.data.get(key, default))))
-            picker.setFixedWidth(140)
+            picker.setFixedWidth(180)
             row.addWidget(picker)
-            preview = button("▶", lambda checked=False, box=picker: self.play_sound(box.currentData()))
-            preview.setFixedWidth(28)
+            preview = button("Play", lambda checked=False, box=picker: self.play_sound(box.currentData()))
+            preview.setProperty("role", "preview")
+            preview.setIcon(icon("play", "#f2f2f7", 18))
+            preview.setMinimumSize(92, 42)
+            preview.setAccessibleName(f"Play {title.lower()} sound")
+            preview.setToolTip(f"Preview {title.lower()} sound")
+            self.sound_previews[key] = preview
+            preview.setEnabled(picker.currentData() != "None")
             row.addWidget(preview)
             sound_rows.addLayout(row)
             self.sound_pickers[key] = picker
             picker.currentTextChanged.connect(lambda: self.persist_settings())
+            picker.currentIndexChanged.connect(lambda _, box=picker, action=preview:
+                action.setEnabled(box.currentData() != "None"))
             self.settings_controls.extend((picker, preview))
         sounds.addWidget(self.sound_options)
         self.sound_options.setVisible(self.sounds_enabled.isChecked())
@@ -508,38 +602,70 @@ class App(QMainWindow):
         updates.addLayout(row)
         updates.addWidget(button("View project ↗", lambda: self.open_url(f"https://github.com/{UPDATE_REPO}"), True),
             0, Qt.AlignmentFlag.AlignLeft)
+        # Put the controls that make dictation work before background preferences.
+        for section in (api, microphone, shortcut, output, indicator, general, sounds, usage, updates):
+            frame = section.parentWidget()
+            self.settings_layout.removeWidget(frame)
+            self.settings_layout.addWidget(frame)
 
     def build_transcripts(self):
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search…")
+        self.search.setPlaceholderText("Search your transcripts")
+        self.search.setAccessibleName("Search transcripts")
+        self.search.setMinimumHeight(44)
         self.search.addAction(icon("search", size=14), QLineEdit.ActionPosition.LeadingPosition)
         self.search.setClearButtonEnabled(True)
-        self.search.setStyleSheet("background:#1c1c21;")
         self.search.textChanged.connect(self.search_history)
         self.transcripts_layout.addWidget(self.search)
         self.live_card = QFrame()
         self.live_card.setObjectName("card")
         live = QVBoxLayout(self.live_card)
-        live.setContentsMargins(16, 16, 16, 16)
-        live.addWidget(label("Live transcript", "section"))
+        live.setContentsMargins(20, 18, 20, 18)
+        live_header = QHBoxLayout()
+        live_header.addWidget(label("Live transcript", "section"), 1)
+        self.live_copy = self.copy_button(lambda: self.current_text, "Copy live transcript")
+        self.live_copy.setEnabled(False)
+        live_header.addWidget(self.live_copy)
+        live.addLayout(live_header)
         self.preview = label("Start speaking…")
         self.preview.setWordWrap(True)
+        self.preview.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         live.addWidget(self.preview)
-        live.addWidget(button("Copy", lambda: self.copy(self.current_text), True), 0, Qt.AlignmentFlag.AlignRight)
         self.transcripts_layout.addWidget(self.live_card)
         self.live_card.hide()
         self.history_container = QWidget()
         self.history_layout = QVBoxLayout(self.history_container)
         self.history_layout.setContentsMargins(0, 0, 0, 0)
-        self.history_layout.setSpacing(8)
+        self.history_layout.setSpacing(16)
         self.transcripts_layout.addWidget(self.history_container)
         self.empty_history = label("No transcripts yet")
         self.empty_history.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_history.setStyleSheet("color:#48484f;padding:50px 0;font-size:13px;")
+        self.empty_history.setWordWrap(True)
+        self.empty_history.setStyleSheet("color:#a3a3af;padding:48px 12px;font-size:14px;")
         self.transcripts_layout.addWidget(self.empty_history)
-        self.more_button = button("Show more", self.show_more, True)
+        self.more_button = button("Show more", self.show_more)
         self.transcripts_layout.addWidget(self.more_button)
+
+    def copy_button(self, text, name):
+        widget = button("Copy text", lambda: self.copy(text(), widget))
+        widget.setProperty("role", "copy")
+        widget.setIcon(icon("copy", "#75eaf7", 16))
+        widget.setMinimumSize(118, 42)
+        widget.setAccessibleName(name)
+        widget.setToolTip(name)
+        widget.reset_feedback = QTimer(widget)
+        widget.reset_feedback.setSingleShot(True)
+        widget.reset_feedback.timeout.connect(lambda: self.reset_copy_button(widget))
+        return widget
+
+    @staticmethod
+    def reset_copy_button(widget):
+        widget.setText("Copy text")
+        widget.setProperty("copied", False)
+        widget.setIcon(icon("copy", "#75eaf7", 16))
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
     def build_permissions(self):
         permissions = self.card(None, self.permissions_layout)
@@ -580,12 +706,16 @@ class App(QMainWindow):
         for number, (item, image, caption, badge, symbol) in enumerate(self.nav):
             selected = number == index
             item.setChecked(selected)
-            caption.setStyleSheet(f"font-size:13px;font-weight:500;color:{'#ffffff' if selected else '#797980'};")
-            image.setPixmap(icon(symbol, "#e5e5e9" if selected else "#797980", 14).pixmap(18, 18))
+            caption.setStyleSheet(f"font-size:13px;font-weight:600;color:{'#e8faff' if selected else '#a3a3af'};")
+            image.setPixmap(icon(symbol, CYAN if selected else "#a3a3af", 16).pixmap(18, 18))
 
     def fade_in(self, widget):
         self.page_fade.stop()
         self.end_fade()
+        duration = motion_duration(160)
+        if not duration:
+            return
+        self.page_fade.setDuration(duration)
         self.fading = widget
         widget.setGraphicsEffect(QGraphicsOpacityEffect(widget, opacity=0.0))
         self.page_fade.start()
@@ -600,26 +730,11 @@ class App(QMainWindow):
             self.fading.setGraphicsEffect(None)
             self.fading = None
 
-    def toggle_sidebar(self):
-        self.collapsed = not self.collapsed
-        self.sidebar_slide.stop()
-        self.sidebar_slide.setStartValue(self.sidebar.width())
-        self.sidebar_slide.setEndValue(54 if self.collapsed else 200)
-        self.sidebar_slide.start()
-        self.brand.setVisible(not self.collapsed)
-        self.status_label.setVisible(not self.collapsed)
-        self.collapse_button.setToolTip("Expand sidebar" if self.collapsed else "Collapse sidebar")
-        for index, (item, image, caption, badge, symbol) in enumerate(self.nav):
-            caption.setVisible(not self.collapsed)
-            badge.setVisible(not self.collapsed and index == 1 and bool(self.data.get("history")))
-            item.layout().setContentsMargins(7 if self.collapsed else 10, 0, 7 if self.collapsed else 10, 0)
-        self.set_status(self.status_message)
-
     def set_status(self, message):
         self.status_message = message
-        self.status_label.setText(QFontMetrics(self.status_label.font()).elidedText(message,
-            Qt.TextElideMode.ElideRight, 148))
-        self.status_label.setToolTip(message)
+        self.status_dot.setToolTip(message)
+        self.session_status.setText(message)
+        self.update_compact()
         color = YELLOW if self.state == "listening" else BRAND[0] if self.state in ("connecting", "stopping") else GREEN
         self.status_dot.setStyleSheet(f"color:{color};font-size:10px;")
         if hasattr(self, "indicator"):
@@ -715,6 +830,8 @@ class App(QMainWindow):
         clear_layout(self.keycaps)
         for name in self.data.get("shortcut_label", "Ctrl + Alt + Space").split(" + "):
             self.keycaps.addWidget(label(name, "keycap"))
+        self.session_hint.setText(self.data.get("shortcut_label", "Ctrl + Alt + Space"))
+        self.session_hint.setToolTip(self.session_hint.text())
 
     def change_shortcut(self, modifiers, key, description):
         old_modifiers = self.data.get("shortcut_modifiers", 3)
@@ -800,36 +917,49 @@ class App(QMainWindow):
         history = self.data.get("history", [])
         query = self.search.text().casefold()
         filtered = [record for record in history if query in record["text"].casefold()]
-        self.history_count.setText(str(len(filtered)) if filtered else "")
+        self.history_count.setText(str(len(filtered)))
         self.clear_button.setVisible(bool(history))
         self.empty_history.setVisible(not filtered)
-        self.empty_history.setText("No results" if query else "No transcripts yet")
+        self.empty_history.setText("No matching transcripts. Try another word or clear the search." if query else
+            "Your next idea starts here.\nStart dictation and your transcript will appear in this space.")
         self.more_button.setVisible(len(filtered) > self.display_limit)
         self.more_button.setText(f"Show more ({max(0, len(filtered)-self.display_limit)})")
         badge = self.nav[1][3]
         badge.setText(str(len(history)))
-        badge.setVisible(bool(history) and not self.collapsed)
+        badge.setVisible(bool(history))
         for record in filtered[:self.display_limit]:
             row = self.card(None, self.history_layout)
-            row.setContentsMargins(14, 14, 14, 14)
-            row.setSpacing(8)
             header = QHBoxLayout()
-            tag = "PARTIAL" if record.get("partial") else "PASTED" if record.get("inserted") else "HISTORY"
-            status = label(tag)
-            status.setStyleSheet(f"font-size:10px;font-weight:700;letter-spacing:0.5px;color:{GREEN if tag == 'PASTED' else YELLOW};")
-            header.addWidget(status)
-            header.addStretch()
-            date = label(record["date"].replace("T", "  "), "detail")
-            date.setStyleSheet("font-size:10px;color:#505057;")
+            try:
+                timestamp = datetime.datetime.fromisoformat(record["date"])
+                day = timestamp.date()
+                today = datetime.date.today()
+                date_text = "Today" if day == today else "Yesterday" if day == today - datetime.timedelta(days=1) else day.strftime("%d %b %Y")
+                date_text += timestamp.strftime(" · %H:%M")
+            except (ValueError, TypeError):
+                date_text = str(record.get("date", ""))
+            date = label(date_text, "detail")
             header.addWidget(date)
+            header.addStretch()
+            header.addWidget(self.copy_button(lambda value=record["text"]: value, f"Copy transcript from {date_text}"))
             row.addLayout(header)
             text = label(record["text"])
             text.setWordWrap(True)
-            text.setStyleSheet("font-size:13px;color:#d9d9dd;")
-            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            text.setMinimumWidth(0)
+            text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            text.setStyleSheet("font-size:15px;color:#ededf2;padding:2px 0;")
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
             row.addWidget(text)
-            row.addWidget(button("Copy", lambda checked=False, value=record["text"]: self.copy(value), True),
-                0, Qt.AlignmentFlag.AlignRight)
+            footer = QHBoxLayout()
+            partial = record.get("partial")
+            tag = "Partial · review before using" if partial else "Pasted to app" if record.get("inserted") else "Saved on this PC"
+            status = label(tag, "detail")
+            status.setStyleSheet(f"font-size:11px;color:{YELLOW if partial else GREEN if record.get('inserted') else '#a3a3af'};")
+            footer.addWidget(status)
+            footer.addStretch()
+            words = len(record["text"].split())
+            footer.addWidget(label(f"{words} {'word' if words == 1 else 'words'}", "detail"))
+            row.addLayout(footer)
 
     def clear_history(self):
         if self.state != "idle":
@@ -876,6 +1006,10 @@ class App(QMainWindow):
         self.session_copy_after = self.copy_after.isChecked()
         self.state = "connecting"
         self.current_text = ""
+        self.recorded_seconds = None
+        self.cloud_connected = False
+        self.live_copy.setEnabled(False)
+        self.reset_copy_button(self.live_copy)
         self.preview.setText("Start speaking…")
         self.live_card.show()
         self.set_status("Starting…")
@@ -912,15 +1046,25 @@ class App(QMainWindow):
                 dot, description = self.microphone_permission
                 dot.setStyleSheet(f"color:{GREEN};font-size:12px;")
                 description.setText("Granted · microphone is recording")
-                self.set_status("Listening… tap the shortcut or release it to finish.")
+                self.set_status("Recording your voice while transcription connects…")
                 self.feedback("start_sound")
                 self.update_recording_controls()
             elif kind == "update":
                 self.show_update(*value)
+            elif kind == "connected":
+                self.cloud_connected = True
+                if self.state == "listening":
+                    self.set_status("Listening… tap the shortcut or release it to finish.")
+                    self.update_recording_controls()
+            elif kind == "duration":
+                self.recorded_seconds = value
             elif kind == "level":
                 self.indicator.level = value
+                self.audio_meter.set_level(value if self.state == "listening" else 0)
+                self.compact.meter.set_level(value if self.state == "listening" else 0)
             elif kind == "transcript":
                 self.current_text = value
+                self.live_copy.setEnabled(bool(value))
                 self.preview.setText(value)
                 self.set_status(self.status_message)
                 if value and self.live_text.isChecked() and self.indicator.isVisible():
@@ -939,10 +1083,12 @@ class App(QMainWindow):
         self.state = "idle"
         self.session = None
         self.current_text = text
+        self.live_copy.setEnabled(bool(text))
         self.live_card.hide()
         self.preview.setText(text)
         if self.started_at is not None:
-            self.data["duration_seconds"] = self.data.get("duration_seconds", 0) + time.monotonic() - self.started_at
+            duration = self.recorded_seconds if self.recorded_seconds is not None else time.monotonic() - self.started_at
+            self.data["duration_seconds"] = self.data.get("duration_seconds", 0) + duration
             self.data["session_count"] = self.data.get("session_count", len(self.data.get("history", []))) + 1
             self.started_at = None
             self.feedback("stop_sound")
@@ -962,8 +1108,6 @@ class App(QMainWindow):
                 record["inserted"] = self.paste(text)
                 self.set_status("Text inserted." if record["inserted"] else
                     "Text saved. Copy it from Transcripts.")
-                if self.session_copy_after:
-                    self.copy(text)
                 try:
                     save_data(self.data)
                 except OSError:
@@ -977,6 +1121,9 @@ class App(QMainWindow):
                 # A notification instead of popping the whole window up.
                 self.notice_page = 1  # Transcripts keeps the partial text
                 self.tray.showMessage("Blablabla", error, QSystemTrayIcon.MessageIcon.Warning, 8000)
+        elif text and not self.closing and not self.session_copy_only and not record.get("inserted") and not self.isVisible():
+            self.notice_page = 1
+            self.tray.showMessage("Transcript ready", "Open Transcripts to copy your text.", QSystemTrayIcon.MessageIcon.Information, 5000)
         self.refresh_history()
         self.update_usage()
         self.update_recording_controls()
@@ -987,19 +1134,35 @@ class App(QMainWindow):
         text = "Finalizing…" if stopping else "Stop dictation" if active else "Start dictation"
         self.button.setText(text)
         self.button.setEnabled(not stopping and not self.closing)
+        self.button.setProperty("role", "stop" if active else "primary")
+        self.button.setIcon(icon("stop" if active else "mic", "#260b18" if active else "#092328", 17))
+        self.button.style().unpolish(self.button)
+        self.button.style().polish(self.button)
+        self.voice_panel.set_state(self.state)
+        self.session_heading.setText({"idle": "Ready to dictate", "connecting": "Opening microphone…",
+            "listening": "Listening to you" if self.cloud_connected else "Recording · connecting…",
+            "stopping": "Finishing your transcript…"}[self.state])
+        if not active:
+            self.audio_meter.set_level(0)
+            self.compact.meter.set_level(0)
+        self.update_session_clock()
         self.tray_record_action.setText(text)
         self.tray_record_action.setEnabled(not stopping and not self.closing)
         for control in self.settings_controls:
             control.setEnabled(self.state == "idle" and not self.closing)
+        for key, picker in self.sound_pickers.items():
+            self.sound_previews[key].setEnabled(self.state == "idle" and not self.closing and picker.currentData() != "None")
         self.update_indicator()
 
     def update_indicator(self):
         self.tray.setIcon(self.tray_icons[self.state])
         self.indicator.state = self.state
         self.indicator.update()
-        visible = not self.closing and (self.state != "idle" or not self.indicator_only_recording.isChecked())
+        visible = not self.compact_mode and not self.closing and (self.state != "idle" or not self.indicator_only_recording.isChecked())
         self.indicator.setVisible(visible)
-        if self.state == "idle" or self.closing:
+        self.update_compact()
+        self.compact.setVisible(self.compact_mode and not self.closing)
+        if self.state == "idle" or self.closing or self.compact_mode:
             self.caption.hide()
 
     def position_indicator(self):
@@ -1029,21 +1192,46 @@ class App(QMainWindow):
     def paste(self, text):
         """Paste in one go via the clipboard, then restore what the user had there."""
         clipboard = QApplication.clipboard()
-        previous = QMimeData()
-        source = clipboard.mimeData()
-        for fmt in source.formats() if source else ():
-            previous.setData(fmt, source.data(fmt))
+        pending = self.pending_clipboard
+        if pending and pending[1:] == (self.clipboard_revision, native.clipboard_sequence()):
+            previous = pending[0]  # a rapid second paste still restores the original
+        else:
+            previous = QMimeData()
+            source = clipboard.mimeData()
+            for fmt in source.formats() if source else ():
+                previous.setData(fmt, source.data(fmt))
+        self.clipboard_timer.stop()
         clipboard.setText(text)
+        self.pending_clipboard = (previous, self.clipboard_revision, native.clipboard_sequence())
         inserted = native.paste(self.target)
         if not self.session_copy_after:
             # The target reads the clipboard asynchronously; give it time first.
-            QTimer.singleShot(1500, lambda: clipboard.text() == text and clipboard.setMimeData(previous))
+            self.clipboard_timer.start(1500)
+        else:
+            self.pending_clipboard = None
         return inserted
 
-    def copy(self, text):
+    def restore_clipboard(self):
+        pending, self.pending_clipboard = self.pending_clipboard, None
+        if pending and pending[1:] == (self.clipboard_revision, native.clipboard_sequence()):
+            QApplication.clipboard().setMimeData(pending[0])
+
+    def copy(self, text, source=None):
         if text:
+            # An explicit copy must also cancel a pending restoration when the
+            # user copies exactly the same text that was just pasted.
+            self.clipboard_revision += 1
+            self.clipboard_timer.stop()
+            self.pending_clipboard = None
             QApplication.clipboard().setText(text)
             self.set_status("Copied to clipboard.")
+            if source is not None:
+                source.setText("Copied")
+                source.setIcon(icon("check", "#85f497", 16))
+                source.setProperty("copied", True)
+                source.style().unpolish(source)
+                source.style().polish(source)
+                source.reset_feedback.start(1800)
 
     def feedback(self, key):
         if self.sounds_enabled.isChecked():
@@ -1053,7 +1241,14 @@ class App(QMainWindow):
     def play_sound(name):
         if name != "None":
             try:
-                winsound.PlaySound(name, winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+                if name.startswith("tone:"):
+                    # Only known bundled tones can resolve a filename.
+                    if name not in {value for _, value in SOUNDS}:
+                        return
+                    path = RESOURCES / "Sounds" / (name.removeprefix("tone:") + ".wav")
+                    winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+                else:
+                    winsound.PlaySound(name, winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
             except RuntimeError:
                 pass
 
@@ -1085,6 +1280,8 @@ class App(QMainWindow):
             self.update_detail.setText("You're up to date")
 
     def show_window(self):
+        if self.compact_mode:
+            self.set_compact_mode(False)
         self.showNormal()
         self.raise_()
         self.activateWindow()
@@ -1094,7 +1291,7 @@ class App(QMainWindow):
             dwm = ctypes.WinDLL("dwmapi")
             dwm.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
             # Caption colour (BGR) matches the dark Mica tint, overriding the accent colour.
-            for attribute, value in ((20, 1), (33, 2), (35, 0x0023201F if self.mica else 0x00141212)):
+            for attribute, value in ((20, 1), (33, 2), (35, 0x00141010)):
                 setting = ctypes.c_int(value)
                 dwm.DwmSetWindowAttribute(int(self.winId()), attribute, ctypes.byref(setting), 4)
             if self.mica:
@@ -1139,11 +1336,14 @@ class App(QMainWindow):
         self.disposed = True
         self.closing = True
         self.poll_timer.stop()
+        self.clock_timer.stop()
+        self.clipboard_timer.stop()
         self.hotkey.close()
         QApplication.instance().removeNativeEventFilter(self.hotkey_filter)
         self.indicator.animation.stop()
         self.indicator.close()
         self.caption.close()
+        self.compact.close()
         self.tray.hide()
         self.close()
 
@@ -1160,7 +1360,8 @@ def main():
         QMessageBox.critical(None, "Blablabla could not start",
             f"{error}\n\nLocal data: {DATA_FILE}\nIf the file is damaged, keep a copy before moving it.")
         return 1
-    window.show()
+    if "--background" not in sys.argv and not window.compact_mode:
+        window.show()
     QTimer.singleShot(3000, window.check_updates)
     return qt_app.exec()
 
