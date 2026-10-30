@@ -169,6 +169,25 @@ Ejecuta cinco casos afectados (navegación, rueda, Play, estados de voz y archiv
 de audio). Se puede pasar el nombre de uno de los casos definidos en `CHECKS` para
 comprobar solo ese comportamiento. No ejecuta la suite completa.
 
+Para ejecutar **toda la suite sin interferir con el escritorio**:
+
+```powershell
+.\Windows\.venv\Scripts\python.exe .\Windows\check_ui_headless.py --all
+```
+
+La suite completa headless usa ventanas y portapapeles aislados de Qt. DPAPI y el
+registro de un atajo de prueba se comprueban con Windows; el mensaje `WM_HOTKEY`
+se dirige a la cola del propio proceso. El codificador de `SendInput` y el pegado
+Unicode se validan redirigiendo su límite de entrada a un editor Qt offscreen,
+sin inyectar teclas globales. La variante interactiva con Tk sigue disponible en
+la ejecución de escritorio descrita después.
+
+Validación de cierre (30/10/2026, 0.7.2): **45 pruebas, cero fallos y cero omisiones**.
+Incluye seis regresiones de compacto: sesión compartida, minimización y restauración,
+texto del atajo, preferencias de visibilidad, posición guardada y renderizado de los
+cuatro estados con onda visible y esquinas transparentes. No usa una clave real ni
+envía audio a AssemblyAI; el servicio se simula en las pruebas de protocolo.
+
 Los ocho tonos incluidos se regeneran con `Windows/generate_sounds.py`, usando solo
 la biblioteca estándar. Para actualizar la app sin abrir una ventana ni quitar foco,
 puede iniciarse con `Blablabla.exe --background`; se abre desde la bandeja.

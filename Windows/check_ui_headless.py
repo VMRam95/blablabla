@@ -1,4 +1,4 @@
-"""Focused UI checks without desktop windows, real hotkeys or audio playback."""
+"""Focused checks or --all without desktop windows, global key input or audio."""
 import os
 from pathlib import Path
 import sys
@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 import app
 import test_windows
@@ -37,20 +37,30 @@ class NoDesktopHotkey:
 
 
 def main():
+    all_tests = sys.argv[1:] == ["--all"]
     chosen = sys.argv[1:] or CHECKS
-    if any(name not in CHECKS for name in chosen):
+    if not all_tests and any(name not in CHECKS for name in chosen):
         raise SystemExit("Choose an explicit safe check from CHECKS; native desktop tests are excluded.")
     qt = QApplication.instance() or QApplication([])
     qt.setStyle("Fusion")
     for name in ("segoeui.ttf", "segoeuib.ttf", "seguisb.ttf", "consola.ttf"):
         QFontDatabase.addApplicationFont(str(Path(os.environ["WINDIR"]) / "Fonts" / name))
     qt.setFont(QFont("Segoe UI", 10))
-    suite = unittest.defaultTestLoader.loadTestsFromNames(chosen, module=test_windows)
+    suite = (unittest.defaultTestLoader.loadTestsFromModule(test_windows) if all_tests else
+        unittest.defaultTestLoader.loadTestsFromNames(chosen, module=test_windows))
+    sequence = [0]
+    def clipboard_changed():
+        sequence[0] += 1
+    qt.clipboard().dataChanged.connect(clipboard_changed)
     with patch.object(app.native, "Hotkey", NoDesktopHotkey), \
          patch.object(app.native, "foreground", return_value=0), \
+         patch.object(app.native, "clipboard_sequence", side_effect=lambda: sequence[0]), \
          patch.object(app.App, "dark_titlebar"), \
-         patch.object(app.winsound, "PlaySound"):
+         patch.object(app.winsound, "PlaySound"), \
+         patch.object(QSystemTrayIcon, "show"), \
+         patch.object(QSystemTrayIcon, "showMessage"):
         result = unittest.TextTestRunner(verbosity=2).run(suite)
+    qt.clipboard().dataChanged.disconnect(clipboard_changed)
     return 0 if result.wasSuccessful() else 1
 
 

@@ -1,6 +1,7 @@
 """Protocol regressions plus real Win32 checks; no cloud key required."""
 import ctypes
 import json
+import os
 from pathlib import Path
 import queue
 import tempfile
@@ -14,12 +15,15 @@ import urllib.error
 from PySide6.QtCore import QPoint, QPointF, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QKeySequence, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QKeySequenceEdit, QPushButton
+from PySide6.QtWidgets import QApplication, QKeySequenceEdit, QPlainTextEdit, QPushButton
 
 import app
 import native
 import speech
 import ui
+
+REAL_HOTKEY = native.Hotkey
+HEADLESS = os.environ.get("QT_QPA_PLATFORM") == "offscreen"
 
 
 class FakeSocket:
@@ -213,7 +217,8 @@ class WindowsTests(unittest.TestCase):
         self.assertEqual(native.unprotect_key(native.protect_key("")), "")
 
     def test_hotkey_registers_and_unregisters(self):
-        hotkey = native.Hotkey()
+        # Exercise RegisterHotKey without competing with the running app's shortcut.
+        hotkey = REAL_HOTKEY(7, 0x7B)  # Ctrl + Alt + Shift + F12
         try:
             self.assertTrue(hotkey.registered)
             self.assertFalse(hotkey.poll())
@@ -221,6 +226,9 @@ class WindowsTests(unittest.TestCase):
             hotkey.close()
 
     def test_unicode_input_into_real_edit_control(self):
+        if HEADLESS:
+            self.check_unicode_paste_without_desktop_input()
+            return
         root = tk.Tk()
         try:
             root.title("Blablabla input smoke test")
@@ -242,6 +250,36 @@ class WindowsTests(unittest.TestCase):
             self.assertFalse(native.paste(None))
         finally:
             root.destroy()
+
+    def check_unicode_paste_without_desktop_input(self):
+        # The same native.paste encoder is exercised; only the OS input boundary
+        # is redirected to this offscreen editor instead of the user's desktop.
+        qt = QApplication.instance() or QApplication([])
+        edit = QPlainTextEdit()
+        target = int(edit.winId())
+        clipboard = QApplication.clipboard()
+        clipboard.setText("España, café 😀")
+        def deliver(count, inputs, size):
+            self.assertEqual(count, 4)
+            self.assertEqual(size, ctypes.sizeof(native.Input))
+            self.assertEqual([(item.type, item.keyboard.vk, item.keyboard.flags) for item in inputs],
+                [(1, 0x11, 0), (1, 0x56, 0), (1, 0x56, 2), (1, 0x11, 2)])
+            QTest.keyClick(edit, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+            return count
+        try:
+            with patch.object(native, "foreground", return_value=target), \
+                 patch.object(native.user32, "IsWindow", return_value=True), \
+                 patch.object(native.user32, "GetAsyncKeyState", return_value=0), \
+                 patch.object(native.user32, "SendInput", side_effect=deliver) as send, \
+                 patch.object(native.user32, "SetForegroundWindow") as activate:
+                self.assertTrue(native.paste(target))
+                qt.processEvents()
+                self.assertEqual(edit.toPlainText(), "España, café 😀")
+                self.assertFalse(native.paste(None))
+                send.assert_called_once()
+                activate.assert_not_called()
+        finally:
+            edit.close()
 
     def test_history_persistence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -408,6 +446,140 @@ class QtInterfaceTests(unittest.TestCase):
                     self.assertFalse(rectangles[1].intersects(rectangles[2]))
                     self.assertGreaterEqual(self.client.session_heading.height(),
                         self.client.session_heading.fontMetrics().height())
+
+    def test_compact_buttons_and_expansion_share_the_active_session(self):
+        client = self.client
+        client.key.setText("test-key-not-real")
+        with patch.object(app, "Session") as session, \
+             patch.object(native, "foreground", return_value=123), \
+             patch.object(native, "is_our_window", return_value=False):
+            client.set_compact_mode(True)
+            QTest.mouseClick(client.compact.record, Qt.MouseButton.LeftButton)
+            self.assertEqual(client.state, "connecting")
+            session.return_value.start.assert_called_once()
+            client.events.put(("listening", None))
+            client.events.put(("connected", None))
+            client.events.put(("transcript", "Una idea dentro del compacto"))
+            client.poll()
+            self.assertEqual(client.compact.caption_text, "Una idea dentro del compacto")
+            self.assertFalse(client.caption.isVisible())
+            self.assertFalse(client.indicator.isVisible())
+            QTest.mouseClick(client.compact.expand, Qt.MouseButton.LeftButton)
+            self.assertFalse(client.compact_mode)
+            self.assertTrue(client.isVisible())
+            self.assertEqual(client.state, "listening")
+            self.assertIs(client.session, session.return_value)
+            session.return_value.stop.assert_not_called()
+            QTest.mouseClick(client.button, Qt.MouseButton.LeftButton)
+            self.assertEqual(client.state, "stopping")
+            session.return_value.stop.assert_called_once()
+            session.return_value.start.assert_called_once()
+
+    def test_compact_minimize_idle_keeps_small_indicator_and_restores_same_mode(self):
+        client = self.client
+        with patch.object(app, "Session") as session:
+            client.set_compact_mode(True)
+            self.qt_app.processEvents()
+            self.assertFalse(client.indicator.isVisible())
+            self.assertFalse(client.compact.windowFlags() & Qt.WindowType.Tool == Qt.WindowType.Tool)
+            self.assertTrue(client.compact.windowFlags() & Qt.WindowType.WindowMinimizeButtonHint)
+            QTest.mouseClick(client.compact.minimize, Qt.MouseButton.LeftButton)
+            self.qt_app.processEvents()
+            self.assertTrue(client.compact.isMinimized())
+            self.assertTrue(client.indicator.isVisible())
+            self.assertEqual(client.state, "idle")
+            client.update_indicator()
+            self.assertTrue(client.compact.isMinimized())
+            client.compact.showNormal()  # native taskbar restore goes through this state
+            self.qt_app.processEvents()
+            self.assertTrue(client.compact_mode)
+            self.assertFalse(client.indicator.isVisible())
+            self.assertFalse(client.isVisible())
+            session.assert_not_called()
+
+    def test_compact_minimized_shortcut_feedback_stays_small_until_restored(self):
+        client = self.client
+        client.set_compact_mode(True)
+        client.state = "listening"
+        client.started_at = time.monotonic()
+        client.update_recording_controls()
+        client.events.put(("transcript", "Texto integrado"))
+        client.poll()
+        self.assertFalse(client.caption.isVisible())
+        client.compact.showMinimized()
+        self.qt_app.processEvents()
+        self.assertTrue(client.indicator.isVisible())
+        self.assertTrue(client.caption.isVisible())
+        client.events.put(("transcript", "La frase continúa minimizada"))
+        client.poll()
+        self.assertTrue(client.compact.isMinimized())
+        self.assertEqual(client.caption.text(), "La frase continúa minimizada")
+        client.compact.showNormal()
+        self.qt_app.processEvents()
+        self.assertFalse(client.indicator.isVisible())
+        self.assertFalse(client.caption.isVisible())
+        self.assertEqual(client.compact.caption_text, "La frase continúa minimizada")
+
+    def test_compact_minimized_feedback_respects_visibility_preferences(self):
+        client = self.client
+        client.indicator_only_recording.setChecked(True)
+        client.live_text.setChecked(False)
+        client.set_compact_mode(True)
+        client.compact.showMinimized()
+        self.qt_app.processEvents()
+        self.assertFalse(client.indicator.isVisible())
+        client.state = "listening"
+        client.update_recording_controls()
+        client.events.put(("transcript", "Texto privado sin mostrar"))
+        client.poll()
+        self.assertTrue(client.indicator.isVisible())
+        self.assertFalse(client.caption.isVisible())
+        self.assertNotIn("Texto privado", client.compact.caption_text)
+        client.finish("", None)
+        self.assertTrue(client.compact.isMinimized())
+        self.assertFalse(client.indicator.isVisible())
+
+    def test_compact_mode_and_drag_position_survive_reopening(self):
+        client = self.client
+        client.set_compact_mode(True)
+        client.compact.move(120, 100)
+        client.compact.position_changed.emit()
+        self.assertEqual(client.data["compact_position"], [120, 100])
+        restored = None
+        try:
+            with patch.object(app, "load_data", return_value=dict(client.data)):
+                restored = app.App()
+            self.qt_app.processEvents()
+            self.assertTrue(restored.compact_mode)
+            self.assertTrue(restored.compact.isVisible())
+            self.assertEqual(restored.compact.pos(), QPoint(120, 100))
+            self.assertFalse(restored.indicator.isVisible())
+        finally:
+            if restored:
+                restored.dispose()
+
+    def test_compact_renders_wave_and_transparent_corners_in_every_state(self):
+        client = self.client
+        client.set_compact_mode(True)
+        for state in ("idle", "connecting", "listening", "stopping"):
+            with self.subTest(state=state):
+                client.state = state
+                client.current_text = "El dictado se queda dentro del modo compacto."
+                client.started_at = time.monotonic() - 5
+                client.update_recording_controls()
+                self.qt_app.processEvents()
+                rendered = client.compact.grab().toImage()
+                self.assertEqual(rendered.pixelColor(0, 0).alpha(), 0)
+                self.assertEqual(rendered.pixelColor(150, 80).alpha(), 255)
+                colorful = sum(1 for y in range(16, 48) for x in range(12, 68)
+                    if max(rendered.pixelColor(x, y).red(), rendered.pixelColor(x, y).green()) > 150)
+                self.assertGreater(colorful, 10)
+                self.assertEqual(client.compact.toolTip(), "")
+                output = os.environ.get("BLABLABLA_TEST_ARTIFACTS")
+                if output:
+                    folder = Path(output)
+                    folder.mkdir(parents=True, exist_ok=True)
+                    self.assertTrue(rendered.save(str(folder / f"compact-{state}.png")))
 
     def test_wheel_scroll_reverses_and_keyboard_interrupts_it(self):
         scroll = self.client.settings_page
@@ -596,6 +768,13 @@ class QtInterfaceTests(unittest.TestCase):
         hits = []
         self.client.hotkey_filter.callback = lambda: hits.append("hotkey")
         with patch.object(self.client, "toggle", side_effect=lambda: hits.append("hotkey")):
+            if HEADLESS:
+                # Target this test thread's native message queue, never SendInput.
+                self.assertTrue(native.user32.PostThreadMessageW(
+                    native.kernel32.GetCurrentThreadId(), 0x0312, 0x4242, 0))
+                QTest.qWait(120)
+                self.assertEqual(hits, ["hotkey"])
+                return
             keys = [(0x11, 0), (0x12, 0), (0x20, 0), (0x20, 2), (0x12, 2), (0x11, 2)]
             inputs = (native.Input * len(keys))(*(native.Input(1, native.InputUnion(
                 keyboard=native.KeyboardInput(key, 0, flags, 0, 0))) for key, flags in keys))
