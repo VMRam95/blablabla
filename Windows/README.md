@@ -20,6 +20,12 @@ se oculta y queda un panel flotante de 320 × 112 con la onda, estado, tiempo,
 inicio/parada y texto en directo. Puede arrastrarse; recuerda el modo y la posición
 al reiniciar. El botón de ampliar vuelve a la interfaz completa. Comparte la sesión
 de dictado y el atajo, y sustituye el indicador pequeño mientras está activo.
+La 0.7.1 dibuja onda y texto dentro de la misma superficie del compacto para evitar
+los bloques de repintado durante la escucha. El texto de **Ctrl + Alt + Espacio**
+permanece dentro del panel. El botón **Minimize to taskbar** lo minimiza en la barra
+de tareas central, incluso con **Minimize to tray** activado para la ventana completa;
+al pulsar su icono vuelve el mismo compacto. El dictado no restaura por su cuenta
+una ventana que se haya minimizado. El panel sigue siendo arrastrable.
 La rama de trabajo es `feat/windows-local`; el código original de macOS permanece
 en `Sources/`. No requiere Xcode, Electron ni un servidor local.
 

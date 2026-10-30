@@ -2,9 +2,9 @@
 import math
 
 from PySide6.QtCore import QByteArray, QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QWheelEvent
+from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QWheelEvent
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QFrame, QLabel, QPushButton, QScrollArea, QWidget
 
 from native import animations_enabled
 
@@ -166,6 +166,12 @@ class VoicePanel(QFrame):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.isWindow():
+            # Clear the translucent backing store before repainting a floating
+            # surface, including pixels left over from previous animation frames.
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         bounds = QRectF(self.rect()).adjusted(.5, .5, -.5, -.5)
         path = QPainterPath()
         path.addRoundedRect(bounds, 16, 16)
@@ -190,8 +196,8 @@ class VoicePanel(QFrame):
 
 class MotionButton(QPushButton):
     """Native button semantics with an interruptible, short hover highlight."""
-    def __init__(self, text=""):
-        super().__init__(text)
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
         self.hover_amount = 0.0
         self.hover_animation = QVariantAnimation(self)
         self.hover_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -307,6 +313,7 @@ def icon(name, color="#77777d", size=18):
         "play": '<path d="m8 5 11 7-11 7Z"/>',
         "compact": '<rect x="3" y="4" width="18" height="16" rx="2"/><rect x="12" y="11" width="6" height="6" rx="1"/>',
         "expand": '<path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/>',
+        "minimize": '<path d="M5 17h14"/>',
         "search": '<circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/>',
         "refresh": '<path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5"/>',
     }
@@ -400,17 +407,21 @@ class AudioMeter(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.draw_wave(painter, self.shown_level)
+
+    @staticmethod
+    def draw_wave(painter, level):
         glow = QRadialGradient(QPointF(28, 16), 29)
-        glow.setColorAt(0, QColor(0, 217, 242, round(18 + 25 * self.shown_level)))
+        glow.setColorAt(0, QColor(0, 217, 242, round(18 + 25 * level)))
         glow.setColorAt(1, QColor(0, 217, 242, 0))
-        painter.fillRect(self.rect(), glow)
+        painter.fillRect(QRectF(0, 0, 56, 32), glow)
         gradient = QLinearGradient(5, 0, 51, 0)
         for index, color in enumerate(BRAND):
             gradient.setColorAt(index/3, QColor(color))
         points = [(0,.5),(.12,.5),(.20,.3),(.28,.65),(.36,.15),(.44,.8),
                   (.52,.08),(.60,.88),(.68,.20),(.76,.62),(.84,.38),(.92,.5),(1,.5)]
         path = QPainterPath()
-        amplitude = 19 + 13 * self.shown_level
+        amplitude = 19 + 13 * level
         for index, (x, y) in enumerate(points):
             point = QPointF(5 + x*46, 16 + (y-.5)*amplitude)
             path.lineTo(point) if index else path.moveTo(point)
@@ -493,73 +504,112 @@ class CompactPanel(VoicePanel):
 
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        # A normal top-level window stays available in the central taskbar.
+        # ShowWithoutActivating preserves the external dictation target on entry.
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowMinimizeButtonHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle("Blablabla compact")
+        self.setAccessibleName("Blablabla compact")
         self.setStyleSheet(STYLE)
         self.setFixedSize(320, 112)
         self.drag_offset = None
-        column = QVBoxLayout(self)
-        column.setContentsMargins(12, 10, 12, 10)
-        column.setSpacing(6)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        self.meter = AudioMeter()
-        row.addWidget(self.meter)
-        titles = QVBoxLayout()
-        titles.setSpacing(2)
-        titles.addWidget(label("Blablabla", "section"))
-        self.status = label("Ready", "detail")
-        self.status.setMinimumWidth(0)
-        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        titles.addWidget(self.status)
-        row.addLayout(titles, 1)
-        self.record = MotionButton()
-        self.record.setProperty("role", "primary")
-        self.record.setFixedSize(42, 42)
+        self.shown_level = 0.0
+        self.heading = "Ready"
+        self.caption_text = ""
+        self.button_state = None
+        self.smoothing = QVariantAnimation(self)
+        self.smoothing.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.smoothing.valueChanged.connect(self.show_level)
+        self.record = MotionButton(parent=self)
+        self.record.setGeometry(198, 10, 42, 42)
         self.record.setStyleSheet("padding:0;min-height:40px;border-radius:20px;")
         self.record.setCursor(Qt.CursorShape.PointingHandCursor)
         self.record.clicked.connect(lambda checked=False: self.toggle_requested.emit())
-        row.addWidget(self.record)
-        self.expand = MotionButton()
-        self.expand.setIcon(icon("expand", "#dedee8", 17))
-        self.expand.setFixedSize(32, 36)
+        self.minimize = MotionButton(parent=self)
+        self.minimize.setGeometry(246, 13, 28, 36)
+        self.minimize.setIcon(icon("minimize", "#dedee8", 16))
+        self.minimize.setStyleSheet("padding:0;min-height:30px;")
+        self.minimize.setToolTip("Minimize to taskbar")
+        self.minimize.setAccessibleName("Minimize to taskbar")
+        self.minimize.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.minimize.clicked.connect(lambda checked=False: self.showMinimized())
+        self.expand = MotionButton(parent=self)
+        self.expand.setGeometry(280, 13, 28, 36)
+        self.expand.setIcon(icon("expand", "#dedee8", 16))
         self.expand.setStyleSheet("padding:0;min-height:30px;")
         self.expand.setToolTip("Expand Blablabla")
         self.expand.setAccessibleName("Expand Blablabla")
         self.expand.setCursor(Qt.CursorShape.PointingHandCursor)
         self.expand.clicked.connect(lambda checked=False: self.expand_requested.emit())
-        row.addWidget(self.expand)
-        column.addLayout(row)
-        self.caption = label("", "detail")
-        self.caption.setWordWrap(True)
-        self.caption.setMinimumWidth(0)
-        self.caption.setMaximumHeight(36)
-        self.caption.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        column.addWidget(self.caption)
+
+    def set_level(self, value):
+        target = max(0.0, min(1.0, value))
+        self.smoothing.stop()
+        duration = motion_duration(110)
+        if not duration or not self.isVisible() or self.isMinimized():
+            self.show_level(target)
+            return
+        self.smoothing.setDuration(duration)
+        self.smoothing.setStartValue(self.shown_level)
+        self.smoothing.setEndValue(target)
+        self.smoothing.start()
+
+    def show_level(self, value):
+        self.shown_level = value
+        self.update()
 
     def set_session(self, state, text, message, shortcut, elapsed, closing=False):
         if state != self.state:
             self.set_state(state)
         active = state in ("connecting", "listening")
-        heading = {"idle": "Ready", "connecting": "Connecting…",
-            "listening": "Listening", "stopping": "Finalizing…"}[state]
+        self.heading = {"idle": "Ready", "connecting": "Connecting\u2026",
+            "listening": "Listening", "stopping": "Finalizing\u2026"}[state]
         if elapsed and state != "idle":
-            heading += " · " + elapsed
-        self.status.setText(heading)
-        self.status.setToolTip(message)
-        self.record.setProperty("role", "stop" if active else "primary")
-        self.record.setIcon(icon("stop" if active else "mic", "#260b18" if active else "#092328", 17))
-        self.record.setToolTip("Stop dictation" if active else "Start dictation")
-        self.record.setAccessibleName(self.record.toolTip())
+            self.heading += " \u00b7 " + elapsed
+        if self.button_state != state:
+            self.button_state = state
+            self.record.setProperty("role", "stop" if active else "primary")
+            self.record.setIcon(icon("stop" if active else "mic", "#260b18" if active else "#092328", 17))
+            self.record.setToolTip("Stop dictation" if active else "Start dictation")
+            self.record.setAccessibleName(self.record.toolTip())
+            self.record.style().unpolish(self.record)
+            self.record.style().polish(self.record)
         self.record.setEnabled(state != "stopping" and not closing)
-        self.record.style().unpolish(self.record)
-        self.record.style().polish(self.record)
-        tail = text if len(text) <= 100 else "…" + text[-100:].split(" ", 1)[-1]
-        self.caption.setText(tail or (shortcut if message == "Ready to dictate" else message))
-        self.caption.setToolTip(message + ("\n" + text if text else ""))
+        tail = text if len(text) <= 100 else "\u2026" + text[-100:].split(" ", 1)[-1]
+        self.caption_text = tail or (shortcut if message == "Ready to dictate" else message)
+        description = message + ("\n" + text if text else "")
+        self.setAccessibleDescription(description)
+        self.update()
+
+    def paintEvent(self, event):
+        # Text and the wave share the same translucent backing store. Updating
+        # child labels separately on Windows left stale rectangular regions.
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.save()
+        painter.translate(12, 16)
+        AudioMeter.draw_wave(painter, self.shown_level)
+        painter.restore()
+        font = QFont(self.font())
+        font.setPixelSize(15)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        painter.setPen(QColor("#ededf0"))
+        painter.drawText(QRectF(80, 10, 110, 22), Qt.AlignmentFlag.AlignVCenter, "Blablabla")
+        font.setPixelSize(11)
+        font.setWeight(QFont.Weight.Normal)
+        painter.setFont(font)
+        painter.setPen(QColor("#b6b6c4"))
+        heading = painter.fontMetrics().elidedText(self.heading, Qt.TextElideMode.ElideRight, 110)
+        painter.drawText(QRectF(80, 32, 110, 20), Qt.AlignmentFlag.AlignVCenter, heading)
+        font.setPixelSize(12)
+        painter.setFont(font)
+        caption = QRectF(12, 66, self.width() - 24, 34)
+        painter.setClipRect(caption)
+        painter.drawText(caption, int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignTop), self.caption_text)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

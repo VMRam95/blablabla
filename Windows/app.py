@@ -31,7 +31,7 @@ from ui import (BRAND, CYAN, GREEN, MICA_STYLE, PINK, YELLOW, STYLE, AudioMeter,
 
 DATA_FILE = Path(os.environ["LOCALAPPDATA"]) / "Blablabla" / "windows.json"
 HOLD_TO_TALK = 0.4  # seconds; a shorter press is a tap that toggles
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 UPDATE_REPO = "arturogj92/blablabla"
 
 
@@ -193,6 +193,7 @@ class App(QMainWindow):
         self.indicator = RecordingIndicator()
         self.caption = LiveCaption()
         self.compact = CompactPanel()
+        self.compact.setWindowIcon(self.app_icon)
         self.compact.toggle_requested.connect(self.toggle)
         self.compact.expand_requested.connect(self.show_window)
         self.compact.position_changed.connect(self.save_compact_position)
@@ -320,6 +321,7 @@ class App(QMainWindow):
         if enabled:
             self.position_compact()
             self.hide()
+            self.compact.showNormal()
         self.update_indicator()
 
     def badged_icon(self, color):
@@ -1061,13 +1063,15 @@ class App(QMainWindow):
             elif kind == "level":
                 self.indicator.level = value
                 self.audio_meter.set_level(value if self.state == "listening" else 0)
-                self.compact.meter.set_level(value if self.state == "listening" else 0)
+                self.compact.set_level(value if self.state == "listening" else 0)
             elif kind == "transcript":
                 self.current_text = value
                 self.live_copy.setEnabled(bool(value))
                 self.preview.setText(value)
                 self.set_status(self.status_message)
-                if value and self.live_text.isChecked() and self.indicator.isVisible():
+                if self.compact_mode:
+                    self.caption.hide()
+                elif value and self.live_text.isChecked() and self.indicator.isVisible():
                     self.caption.show_text(value, self.indicator.geometry())
             elif kind == "stopping":
                 self.state = "stopping"
@@ -1144,7 +1148,7 @@ class App(QMainWindow):
             "stopping": "Finishing your transcript…"}[self.state])
         if not active:
             self.audio_meter.set_level(0)
-            self.compact.meter.set_level(0)
+            self.compact.set_level(0)
         self.update_session_clock()
         self.tray_record_action.setText(text)
         self.tray_record_action.setEnabled(not stopping and not self.closing)
@@ -1161,7 +1165,13 @@ class App(QMainWindow):
         visible = not self.compact_mode and not self.closing and (self.state != "idle" or not self.indicator_only_recording.isChecked())
         self.indicator.setVisible(visible)
         self.update_compact()
-        self.compact.setVisible(self.compact_mode and not self.closing)
+        # setVisible(True) on a hidden/minimized window must never be used as
+        # an implicit restore while a shortcut or transcript event is processed.
+        if self.compact_mode and not self.closing:
+            if not self.compact.isVisible() and not self.compact.isMinimized():
+                self.compact.show()
+        else:
+            self.compact.hide()
         if self.state == "idle" or self.closing or self.compact_mode:
             self.caption.hide()
 
