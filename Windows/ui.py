@@ -1,7 +1,7 @@
 """The macOS visual language, drawn with Qt on Windows."""
 import math
 
-from PySide6.QtCore import QByteArray, QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QByteArray, QEasingCurve, QEvent, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QWheelEvent
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QFrame, QLabel, QPushButton, QScrollArea, QWidget
@@ -501,6 +501,7 @@ class CompactPanel(VoicePanel):
     toggle_requested = Signal()
     expand_requested = Signal()
     position_changed = Signal()
+    window_state_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -543,6 +544,11 @@ class CompactPanel(VoicePanel):
         self.expand.setAccessibleName("Expand Blablabla")
         self.expand.setCursor(Qt.CursorShape.PointingHandCursor)
         self.expand.clicked.connect(lambda checked=False: self.expand_requested.emit())
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.window_state_changed.emit()
 
     def set_level(self, value):
         target = max(0.0, min(1.0, value))

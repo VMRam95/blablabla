@@ -26,6 +26,10 @@ permanece dentro del panel. El botón **Minimize to taskbar** lo minimiza en la 
 de tareas central, incluso con **Minimize to tray** activado para la ventana completa;
 al pulsar su icono vuelve el mismo compacto. El dictado no restaura por su cuenta
 una ventana que se haya minimizado. El panel sigue siendo arrastrable.
+En la 0.7.2, minimizar el compacto deja disponible la onda flotante pequeña, con
+estado y texto de escucha al usar el atajo. Respeta **Show only when recording** y
+**Show live text**. Recuperar el compacto oculta de nuevo el indicador y la burbuja
+externos; el dictado no abre por sí solo la ventana minimizada.
 La rama de trabajo es `feat/windows-local`; el código original de macOS permanece
 en `Sources/`. No requiere Xcode, Electron ni un servidor local.
 

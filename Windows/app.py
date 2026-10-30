@@ -31,7 +31,7 @@ from ui import (BRAND, CYAN, GREEN, MICA_STYLE, PINK, YELLOW, STYLE, AudioMeter,
 
 DATA_FILE = Path(os.environ["LOCALAPPDATA"]) / "Blablabla" / "windows.json"
 HOLD_TO_TALK = 0.4  # seconds; a shorter press is a tap that toggles
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.7.2"
 UPDATE_REPO = "arturogj92/blablabla"
 
 
@@ -197,6 +197,7 @@ class App(QMainWindow):
         self.compact.toggle_requested.connect(self.toggle)
         self.compact.expand_requested.connect(self.show_window)
         self.compact.position_changed.connect(self.save_compact_position)
+        self.compact.window_state_changed.connect(self.update_indicator)
         self.position_compact()
         self.indicator.clicked.connect(self.toggle)
         self.indicator.position_changed.connect(self.save_indicator_position)
@@ -1069,7 +1070,7 @@ class App(QMainWindow):
                 self.live_copy.setEnabled(bool(value))
                 self.preview.setText(value)
                 self.set_status(self.status_message)
-                if self.compact_mode:
+                if self.compact_mode and not self.compact.isMinimized():
                     self.caption.hide()
                 elif value and self.live_text.isChecked() and self.indicator.isVisible():
                     self.caption.show_text(value, self.indicator.geometry())
@@ -1162,7 +1163,10 @@ class App(QMainWindow):
         self.tray.setIcon(self.tray_icons[self.state])
         self.indicator.state = self.state
         self.indicator.update()
-        visible = not self.compact_mode and not self.closing and (self.state != "idle" or not self.indicator_only_recording.isChecked())
+        small_indicator = not self.compact_mode or self.compact.isMinimized()
+        visible = small_indicator and not self.closing and (self.state != "idle" or not self.indicator_only_recording.isChecked())
+        if visible and not self.indicator.isVisible():
+            self.position_indicator()
         self.indicator.setVisible(visible)
         self.update_compact()
         # setVisible(True) on a hidden/minimized window must never be used as
@@ -1172,8 +1176,10 @@ class App(QMainWindow):
                 self.compact.show()
         else:
             self.compact.hide()
-        if self.state == "idle" or self.closing or self.compact_mode:
+        if self.state == "idle" or self.closing or not small_indicator or not self.live_text.isChecked():
             self.caption.hide()
+        elif self.current_text and self.indicator.isVisible():
+            self.caption.show_text(self.current_text, self.indicator.geometry())
 
     def position_indicator(self):
         position = self.data.get("indicator_position") if self.free_position.isChecked() else None
