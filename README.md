@@ -164,6 +164,19 @@ open ~/Library/Developer/Xcode/DerivedData/Blablabla-*/Build/Products/Debug/Blab
 
 Or just open `Blablabla.xcodeproj` in Xcode and hit **Cmd+R**.
 
+### Streaming regression tests
+
+On macOS with Swift Command Line Tools installed, run:
+
+```bash
+bash Tests/run-streaming-tests.sh
+```
+
+These deterministic tests compile the streaming client with transport doubles.
+They cover rapid stop/start cleanup, stale callbacks and queued audio, final
+transcript delivery, repeated stop, and cleanup after client deallocation. They
+do not require an API key, microphone access, or a network connection.
+
 ### First launch
 
 1. Paste your AssemblyAI API key

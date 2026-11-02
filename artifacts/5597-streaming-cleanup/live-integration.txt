@@ -1,0 +1,16 @@
+EVENT Begin 1
+PASS: first real AssemblyAI connection opens
+EVENT Begin 2
+PASS: replacement real AssemblyAI connection opens
+PASS: replacement opens inside the old cleanup window
+PASS: replacement survives old delayed cleanup and callbacks
+SYNTHETIC_TRANSCRIPT: This is a connection.
+SYNTHETIC_TRANSCRIPT: This is a connection regression test.
+SYNTHETIC_TRANSCRIPT: This is a connection regression test. The second dictation
+SYNTHETIC_TRANSCRIPT: This is a connection regression test. The second dictation stays connected.
+SYNTHETIC_TRANSCRIPT: This is a connection regression test. The second dictation stays connected.
+EVENT Termination
+PASS: real finalization receives Termination
+PASS: synthetic speech is transcribed without connection errors
+PASS: final real connection is released
+LIVE_INTEGRATION_PASS: 7/7 checks; no microphone or personal audio used

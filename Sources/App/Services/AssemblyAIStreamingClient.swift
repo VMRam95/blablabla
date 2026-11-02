@@ -28,16 +28,21 @@ final class AssemblyAIStreamingClient {
 
     func start(apiKey: String) async throws {
         isStopping = false
+        // A previous session may still be draining while the new token loads.
+        // Its delayed cleanup retains its own handles, not these properties.
+        socketTask = nil
+        session = nil
         let token = try await fetchTemporaryToken(apiKey: apiKey)
         try await openSocket(token: token)
     }
 
     func sendAudio(_ data: Data) {
+        guard let socketTask else { return }
         sendQueue.async { [weak self] in
-            guard let self, let socketTask = self.socketTask else { return }
+            guard let self, self.socketTask === socketTask, !self.isStopping else { return }
             socketTask.send(.data(data)) { [weak self] error in
-                if let error {
-                    self?.onFailure?(error.localizedDescription)
+                if let error, let self, self.socketTask === socketTask, !self.isStopping {
+                    self.onFailure?(error.localizedDescription)
                 }
             }
         }
@@ -46,23 +51,26 @@ final class AssemblyAIStreamingClient {
     func stop() {
         guard !isStopping else { return }
         isStopping = true
+        let socketTask = self.socketTask
+        let session = self.session
 
         let payload = ["type": "Terminate"]
         if let data = try? JSONSerialization.data(withJSONObject: payload),
            let text = String(data: data, encoding: .utf8),
            let socketTask {
             socketTask.send(.string(text)) { [weak self] error in
-                if let error {
-                    self?.onFailure?(error.localizedDescription)
+                if let error, let self, self.socketTask === socketTask {
+                    self.onFailure?(error.localizedDescription)
                 }
             }
         }
 
         DispatchQueue.global().asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.socketTask?.cancel(with: .goingAway, reason: nil)
-            self?.session?.invalidateAndCancel()
-            self?.socketTask = nil
-            self?.session = nil
+            socketTask?.cancel(with: .goingAway, reason: nil)
+            session?.invalidateAndCancel()
+            guard let self, self.socketTask === socketTask else { return }
+            self.socketTask = nil
+            self.session = nil
         }
     }
 
@@ -106,8 +114,9 @@ final class AssemblyAIStreamingClient {
     }
 
     private func receiveNextMessage() {
-        socketTask?.receive { [weak self] result in
-            guard let self else { return }
+        guard let socketTask else { return }
+        socketTask.receive { [weak self] result in
+            guard let self, self.socketTask === socketTask else { return }
 
             switch result {
             case .failure(let error):
@@ -117,9 +126,9 @@ final class AssemblyAIStreamingClient {
             case .success(let message):
                 switch message {
                 case .string(let text):
-                    self.handleRawMessage(text)
+                    self.handleRawMessage(text, from: socketTask)
                 case .data(let data):
-                    self.handleRawMessage(String(decoding: data, as: UTF8.self))
+                    self.handleRawMessage(String(decoding: data, as: UTF8.self), from: socketTask)
                 @unknown default:
                     break
                 }
@@ -131,13 +140,14 @@ final class AssemblyAIStreamingClient {
         }
     }
 
-    private func handleRawMessage(_ rawText: String) {
+    private func handleRawMessage(_ rawText: String, from socketTask: URLSessionWebSocketTask) {
         guard let data = rawText.data(using: .utf8) else { return }
 
         do {
             let decoded = try decoder.decode(AssemblyAIMessage.self, from: data)
             DispatchQueue.main.async { [weak self] in
-                self?.onEvent?(decoded)
+                guard let self, self.socketTask === socketTask else { return }
+                self.onEvent?(decoded)
             }
         } catch {
             onFailure?("Could not decode AssemblyAI message: \(error.localizedDescription)")

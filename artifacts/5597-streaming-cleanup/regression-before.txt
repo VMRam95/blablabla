@@ -1,0 +1,13 @@
+FAIL: the old socket is closed
+FAIL: the replacement socket stays open
+FAIL: delayed cleanup preserves replacement state
+PASS: stopping preserves final transcript events
+FAIL: stale connection errors are ignored
+FAIL: active connection errors still reach the app
+FAIL: queued old transcript events are ignored
+FAIL: active transcript events still reach the app
+FAIL: queued old audio is not sent to the replacement
+PASS: repeated stop closes the socket only once
+PASS: stop without restart clears connection state
+FAIL: scheduled cleanup survives client deallocation
+3/12 checks passed; 9 failed
